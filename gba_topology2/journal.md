@@ -725,6 +725,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
 
 ---
 
+
 ### [Entry 022] "Save Parameters" Diagnostic JSON Export (`sphere_viewer.py`)
 - **Objective**: One-click capture of the full viewer GUI state so issues
   observed on screen can be reproduced in headless diagnostic scripts without
@@ -1094,3 +1095,95 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   that `.plt` to exist on the server's filesystem. Uploading the `.plt`
   itself is the natural next step, and would need the mesh extraction to
   accept an in-memory buffer rather than a path.
+
+
+
+
+### [Entry 027] Pair Scale Distribution Diagnostic (`pair_scales.py`, `inspect_pair_scales.py`)
+
+- **Goal**: replace guessed thresholds with measured ones. The pipeline stacks
+  three length scales -- micro-clustering ($k_{\text{pitch}}$), bridging
+  ($k_{\text{bridge}}$), and whatever macro-clustering range basins need -- and
+  all three are currently set by eye. The question is whether the fields
+  actually separate these scales, i.e. whether the distribution of pairwise
+  separations between consolidated entities has a trough between the meso peak
+  (fragments of one feature) and the macro peak (distinct basins). If it does,
+  the bottom of the trough is the objective cutoff.
+- **New modules**:
+  - `gba_topology2/src/pair_scales.py` -- pure math, no viewer/VTK/Trame import.
+    `PairwiseClearance` records, `compute_pairwise_clearances`, `histogram_bins`,
+    `render_ascii_histogram`, `render_intermediate_registry`,
+    `write_svg_histogram`. Consumes the `MicroCluster` interface, so
+    `ReductionUnit.as_cluster` is measured exactly like a lone cluster.
+  - `gba_topology2/inspect_pair_scales.py` -- CLI. Per field: Morse CPs ->
+    micro-clusters -> bridged units -> **measure** -> ASCII histograms +
+    intermediate registry (+ optional SVG).
+- **Design decisions**:
+  - **Measure before catastrophe reduction.** Catastrophe classification is an
+    interpretation step; measuring after it would report the shape the
+    constellation templates imposed, not the shape of the field. It also keeps
+    the diagnostic aligned with `classify_catastrophes`, which itself consumes
+    raw clusters.
+  - **Two measures, not one.** Centroid separation is dominated by the
+    half-lengths of elongated entities, so tip-to-tip fragments look far apart
+    and crossing corridors look close. The directional edge clearance
+    $\theta_{ij} - r_i(\phi_i) - r_j(\phi_j)$, reusing
+    `cluster_directional_support_radius` from Entry 021, puts touching entities
+    at zero at any orientation and sharpens the trough.
+  - **Normalise by $\Delta\theta_{\text{mesh}}$.** Makes Pd ($R = 1.04$ A) and
+    ethene C ($R = 0.41$ A) share one axis, so fields and datasets plot together.
+  - **Zero-dependency SVG.** matplotlib is not a project dependency; the chart
+    is emitted as standalone XML so it opens in VS Code beside the viewer.
+- **Result -- intermediate pairs in the 2.5-6.0 dtheta transition zone**:
+
+  | field | ethene3 C1 | Pd_20K Pd1 |
+  |---|---|---|
+  | Electron Density | **empty** | **empty** |
+  | V (volume) | 2 | 56 |
+  | shape index | **empty** | 72 |
+  | curvedness | 8 | 4 |
+  | Willmore energy | **empty** | 176 |
+  | modified Willmore | 13 | 19 |
+
+- **Findings**:
+  1. **Density is the cleanest field on both datasets** -- zero intermediate
+     pairs, so its entities are strictly near or strictly far. If basin
+     identification wants a hard-coded cutoff, density is where it is safest.
+  2. **The transition zone is field-specific, not a constant.** Willmore on Pd
+     has 176 pairs there; curvedness on the same atom has 4. A single global
+     macro-clustering radius cannot be correct for all fields, which argues for
+     per-field (or per-field-class) parameters rather than one slider.
+  3. **The ethene3 curvedness registry is entirely compensating dipoles** -- all
+     8 pairs have $\chi_{\text{sum}} = 0$, and they fall into four
+     symmetry-related pairs of two (MC7 and MC8 each facing MC22 at 3.61
+     dtheta; MC10 and MC11 each facing MC20 at 4.44). These are the pairs a
+     macro rule must decide on, and their index balance says merging them would
+     annihilate.
+  4. **The directional measure beats the centroid measure as designed.** On
+     ethene3 curvedness the centroid distribution is empty across the whole
+     2.5-5.5 band while the clearance distribution shows structure at 3.5-6.0 --
+     the structure bridging already acts on. The centroid view would have
+     reported "clean separation" and hidden the real decisions.
+- **Rendering lesson**: scaling bars to the global peak made the charts
+  unreadable. On a sphere most pairs are distant, so the overflow bin (164 of
+  190 on ethene3 curvedness) dwarfs everything and flattens the meso trough --
+  the one feature the chart exists to show. Bars now scale to the peak of the
+  **finite** bins, with the overflow bin clamped and labelled off-scale.
+- **Tooling lesson**: the volume field is stored as plain `V`, so the natural
+  pattern `volume` matches nothing and the short pattern `v` matches
+  "cur**v**edness" and "distance". `_field_matches` treats single-letter
+  patterns as exact base names (name minus `(condensed)` and non-ASCII prefix)
+  and longer patterns as substrings.
+- **Tests**: `tests/test_pair_scales.py` -- 26 tests. Collinear pair clearance
+  equals the analytic tip gap (0.015 rad); perpendicular pair measures the
+  transverse width (0.32 rad) where the isotropic measure reports 0.03;
+  crossing corridors report negative clearance; $\binom{N}{2}$ pair count with
+  no self-pairs; bin conservation including the negative underflow bin; SVG
+  parses as XML and escapes non-ASCII field names. Two tests failed while the
+  code was wrong (empty-meso marker, overflow scaling), confirming both are
+  load-bearing. Suite: 141 passed.
+- **Open next**: (a) run the diagnostic across the remaining ethene variants and
+  more atoms to see whether the per-field ordering in the table is stable;
+  (b) if it is, derive per-field macro-clustering cutoffs from the measured
+  troughs; (c) the density result suggests starting macro-clustering experiments
+  on density, where the separation is cleanest.
