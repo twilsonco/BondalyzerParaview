@@ -2762,6 +2762,46 @@ def run_sphere_viewer(
         layout.drawer.width = 400
 
         with layout.drawer:
+            html.Style("""
+                /* Medium-slate grey pane backgrounds for high contrast against both black and white */
+                .v-navigation-drawer .v-card {
+                    background-color: #3e434c !important;
+                    color: #f0f2f5 !important;
+                }
+                .v-navigation-drawer .v-card-title,
+                .v-navigation-drawer .v-card-subtitle {
+                    color: #ffffff !important;
+                }
+                .v-navigation-drawer .v-card .text-medium-emphasis {
+                    color: #d8dce2 !important;
+                }
+                /* Sub-panels inside cards (e.g. counts grids, table containers) */
+                .v-navigation-drawer .surface,
+                .v-navigation-drawer .v-table {
+                    background-color: #30343b !important;
+                    color: #f0f2f5 !important;
+                }
+                .v-navigation-drawer .v-table th {
+                    background-color: #272a30 !important;
+                    color: #ffffff !important;
+                }
+                /* Slider track, thumb, and label typography contrast */
+                .v-navigation-drawer .v-slider-track__background {
+                    background-color: #202328 !important;
+                    opacity: 0.85 !important;
+                }
+                .v-navigation-drawer .v-slider-track__tick {
+                    background-color: #ffffff !important;
+                    opacity: 0.8 !important;
+                }
+                .v-navigation-drawer .v-slider-track__tick-label,
+                .v-navigation-drawer .v-slider__label,
+                .v-navigation-drawer .v-slider-thumb__label {
+                    color: #ffffff !important;
+                    font-weight: 500 !important;
+                    opacity: 0.95 !important;
+                }
+            """)
             with v3.VContainer(fluid=True, classes="pa-3"):
                 # Confirmation chip for the last "Save Parameters" write.
                 with html.Div(v_if="params_last_saved_path", classes="mb-2"):
@@ -2866,7 +2906,7 @@ def run_sphere_viewer(
                                 )
 
                 # Field Controls
-                with v3.VCard(elevation=2, classes="mb-3"):
+                with v3.VCard(elevation=2, classes="mb-3", color="surface-variant"):
                     with v3.VCardItem():
                         with v3.VCardTitle(classes="text-subtitle-2 font-weight-bold"):
                             html.Span("Condensed Field & Mesh")
@@ -3047,7 +3087,7 @@ def run_sphere_viewer(
                             )
 
                 # Step 2: Micro-Clustering & Interactive 3D Picking
-                with v3.VCard(elevation=2, classes="mb-3"):
+                with v3.VCard(elevation=2, classes="mb-3", color="surface-variant"):
                     with v3.VCardItem():
                         with v3.VCardTitle(
                             classes="text-subtitle-2 font-weight-bold d-flex align-center justify-space-between"

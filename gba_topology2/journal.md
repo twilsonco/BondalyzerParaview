@@ -1187,3 +1187,24 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   (b) if it is, derive per-field macro-clustering cutoffs from the measured
   troughs; (c) the density result suggests starting macro-clustering experiments
   on density, where the separation is cleanest.
+
+---
+
+### [Entry 028] Viewer Sidebar Card Background & Contrast Harmonization (`sphere_viewer.py`)
+
+- **Objective**: Standardize drawer card styling and contrast across all steps in `sphere_viewer.py` to ensure slider labels, ticks, counts, badges, and card contents remain legible against dark mode backgrounds.
+- **Changes**:
+  - `gba_topology2/src/sphere_viewer.py`:
+    - Updated scoped `<style>` block in `SinglePageWithDrawerLayout.drawer`:
+      - Set `.v-navigation-drawer .v-card` background to `#3e434c` with foreground `#f0f2f5`.
+      - Adjusted text medium emphasis color to `#d8dce2` for crisper readability.
+      - Styled sub-surfaces (`.surface`, `.v-table`) to `#30343b` and table headers to `#272a30`.
+      - Increased contrast on slider tracks (`#202328`, opacity 0.85), ticks (`#ffffff`, opacity 0.8), and slider typography (`#ffffff`, opacity 0.95) including `.v-slider-thumb__label`.
+    - Standardized Step card containers (`Field Controls`, `Step 2: Micro-Clusters`) to use `color="surface-variant"` uniformly with the rest of the step cards.
+- **Validation**:
+  - `uv run pytest tests/test_sphere_viewer_*.py`: 43 passed.
+  - `uv run ruff check gba_topology2/src/sphere_viewer.py tests/`: All checks passed.
+  - `uv run ruff format --check gba_topology2/src/sphere_viewer.py tests/`: 23 files formatted.
+  - `uv run mypy gba_topology2/src/sphere_viewer.py`: Success: no issues found.
+  - Headless UI smoke test compiling and initializing viewer layout: passed cleanly.
+  - Full test suite (`uv run pytest`): 253 passed.
