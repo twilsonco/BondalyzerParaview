@@ -2666,7 +2666,6 @@ def run_sphere_viewer(
         "perfect_port_angles",
         "nudge_max_pitch",
         "show_launch_seeds",
-        "launch_seed_pitch",
         "ring_samples",
         "ring_expand_pitch",
         "ring_max_pitch",
@@ -4041,19 +4040,65 @@ def run_sphere_viewer(
                                 classes="d-flex justify-space-between align-center mt-1"
                             ):
                                 html.Div(
-                                    "Launch Offset",
+                                    "Ring Samples",
                                     classes="text-caption font-weight-bold text-medium-emphasis",
                                 )
                                 html.Div(
-                                    "{{ Number(launch_seed_pitch).toFixed(2) }}x δθ",
+                                    "{{ Number(ring_samples).toFixed(0) }} pts ({{ (360 / ring_samples).toFixed(1) }}° pitch)",
                                     classes="text-caption font-weight-bold text-orange",
                                 )
 
                             v3.VSlider(
-                                min=0.1,
-                                max=1.0,
-                                step=0.05,
-                                v_model=("launch_seed_pitch",),
+                                min=24,
+                                max=96,
+                                step=8,
+                                v_model=("ring_samples",),
+                                density="compact",
+                                thumb_label=False,
+                                color="orange",
+                                classes="mt-1",
+                            )
+
+                            with html.Div(
+                                classes="d-flex justify-space-between align-center mt-1"
+                            ):
+                                html.Div(
+                                    "Expand Step",
+                                    classes="text-caption font-weight-bold text-medium-emphasis",
+                                )
+                                html.Div(
+                                    "{{ Number(ring_expand_pitch).toFixed(2) }}x δθ",
+                                    classes="text-caption font-weight-bold text-orange",
+                                )
+
+                            v3.VSlider(
+                                min=0.25,
+                                max=3.0,
+                                step=0.25,
+                                v_model=("ring_expand_pitch",),
+                                density="compact",
+                                thumb_label=False,
+                                color="orange",
+                                classes="mt-1",
+                            )
+
+                            with html.Div(
+                                classes="d-flex justify-space-between align-center mt-1"
+                            ):
+                                html.Div(
+                                    "Radius Ceiling",
+                                    classes="text-caption font-weight-bold text-medium-emphasis",
+                                )
+                                html.Div(
+                                    "{{ Number(ring_max_pitch).toFixed(1) }}x δθ ({{ (ring_max_pitch * geom_info.mesh_pitch_deg).toFixed(1) }}°)",
+                                    classes="text-caption font-weight-bold text-orange",
+                                )
+
+                            v3.VSlider(
+                                min=2.0,
+                                max=24.0,
+                                step=1.0,
+                                v_model=("ring_max_pitch",),
                                 density="compact",
                                 thumb_label=False,
                                 color="orange",
@@ -4088,19 +4133,75 @@ def run_sphere_viewer(
                                             "{{ launch_stats.max_fold_order }}",
                                             classes="text-subtitle-2 font-weight-bold",
                                         )
+                                with v3.VRow(
+                                    dense=True, classes="text-caption text-center"
+                                ):
+                                    with v3.VCol(cols=6):
+                                        html.Div(
+                                            "Ring @ a0", classes="text-medium-emphasis"
+                                        )
+                                        html.Div(
+                                            "{{ launch_stats.n_rings_converged_at_a0 }}",
+                                            classes="text-subtitle-2 font-weight-bold text-success",
+                                        )
+                                    with v3.VCol(cols=6):
+                                        html.Div(
+                                            "Expanded", classes="text-medium-emphasis"
+                                        )
+                                        html.Div(
+                                            "{{ launch_stats.n_rings_expanded }}",
+                                            classes="text-subtitle-2 font-weight-bold text-warning",
+                                        )
+                                html.Div(
+                                    "Mean {{ Number(launch_stats.mean_radii_tried).toFixed(2) }} radii profiled (max {{ launch_stats.max_radii_tried }})",
+                                    classes="text-caption text-medium-emphasis text-center mt-1",
+                                )
 
                             with html.Div(
-                                v_if="launch_stats.n_index_mismatch > 0",
+                                v_if="launch_stats.n_rings_k_mismatch > 0",
                                 classes="text-caption font-mono mt-1 text-deep-orange",
                             ):
                                 html.Div(
-                                    "Index mismatch (k != mu+1): {{ launch_stats.n_index_mismatch }}"
+                                    "Index mismatch (ring k != reduction k): {{ launch_stats.n_rings_k_mismatch }}"
                                 )
+                            with html.Div(
+                                v_if="launch_stats.n_rings_unbalanced > 0",
+                                classes="text-caption font-mono mt-1 text-deep-orange",
+                            ):
+                                html.Div(
+                                    "Never balanced (degenerate core): {{ launch_stats.n_rings_unbalanced }}"
+                                )
+
+                            with html.Div(
+                                v_if="launch_stats.n_rings_failed > 0",
+                                classes="mt-2 pa-2 rounded surface",
+                            ):
+                                html.Div(
+                                    "Unresolved rings ({{ launch_stats.n_rings_failed }})",
+                                    classes="text-caption font-weight-bold text-medium-emphasis",
+                                )
+                                with v3.VList(
+                                    density="compact", classes="pa-0 bg-transparent"
+                                ):
+                                    with v3.VListItem(
+                                        v_for="f in launch_stats.failures",
+                                        key="f.id",
+                                        classes="px-1 py-0",
+                                    ):
+                                        html.Span(
+                                            "{{ f.id }}",
+                                            classes="text-caption font-mono font-weight-bold text-deep-orange",
+                                        )
+                                        html.Span(
+                                            "{{ f.status }} · {{ f.observed_k > 0 ? 'k=' + f.observed_k + '≠' + f.expected_k : 'never balanced' }} · {{ f.radii_tried }} radii · @{{ f.final_radius_deg.toFixed(1) }}°",
+                                            classes="text-caption font-mono text-medium-emphasis ml-1",
+                                        )
+
                             with html.Div(
                                 classes="text-caption text-medium-emphasis mt-1 font-italic",
                             ):
                                 html.Div(
-                                    "k=2 simple saddle, k=3 monkey (3-basin junction), k=4 octupolar."
+                                    "Seeds launch from each saddle's excision boundary, expanded until the port signature is pure. k=2 simple, k=3 monkey, k=4 octupolar."
                                 )
 
                 # Inspector Card: Selected Catastrophe

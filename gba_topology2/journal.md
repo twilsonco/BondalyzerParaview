@@ -1423,3 +1423,24 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   - `tests/test_diagnose_params.py`: fixture gains the ring params and a real locator. The octahedron end-to-end still asserts `n_saddles_seeded == 2` and now yields 2 saddles x k = 2 = 4 ascent + 4 descent, converged at a0 -- a meaningful check on a 6-vertex, 90 deg-pitch mesh.
   - `uv run pytest`: **403 passed**. `ruff format` / `ruff check` / `mypy gba_topology2/ tests/`: clean.
 - **Open next**: the sidebar (unit 8) -- `launch_seed_pitch` is now dead in the pipeline and must be replaced by the ring sliders and the failure list.
+
+---
+
+### [Entry 036] Launch Seeds Sidebar: Ring Controls and Failure List (`sphere_viewer.py`)
+
+- **Objective**: Expose the excision ring controls, the expansion outcome taxonomy, and the unresolved-ring list, so the substrate is tunable and a flagged ring is findable in the scene.
+- **Changes**:
+  - Replaced the Launch Offset slider (`launch_seed_pitch`) with three controls: **Ring Samples** (24-96, step 8), **Expand Step** (0.25-3.0 x dtheta), **Radius Ceiling** (2-24 x dtheta, shown with its degree equivalent).
+  - Second stats row: **Ring @ a0** (green) and **Expanded** (amber), plus "Mean N radii profiled (max M)". The split is the tuning signal -- a high expanded count says the excision-radius rule is too tight.
+  - Separate lines for `n_rings_k_mismatch` ("ring k != reduction k") and `n_rings_unbalanced` ("never balanced (degenerate core)"), which the old single "Index mismatch (k != mu+1)" line conflated.
+  - **Unresolved rings** list: id, status, observed vs expected k, radii tried, final radius.
+  - Retired `launch_seed_pitch` from `DEFAULT_UI_STATE` and the `@state.change` handler. No consumers remained after the Step 9 rewire.
+- **Retiring a control key needs no fixture migration**: `load_params_from_dict` iterates the *schema's* keys and reads them from the payload, so an extra key in an old file is simply ignored. Only *adding* a key breaks old files, which is why Entry 034's version bump was required and this one is not.
+- **Verified live** (headless server on `ethene4.plt`, atom C1, driven through the browser):
+  - Layout builds; all three sliders render with correct values and derived labels ("48 pts (7.5 deg pitch)", "1.00x dtheta", "12.0x dtheta (85.0 deg)").
+  - **Sliders are reactive**: moving Ring Samples 48 -> 88 recomputed the pipeline live -- seeded 10 -> 9, expanded 0 -> 6, mean radii 1.33 -> 3.33, mismatches 2 -> 3, and the failure list repopulated with new ids.
+  - Failure rows render with the id and diagnosis separated ("SAD_444 k_mismatch . k=3 != 2 . 3 radii . @21.3 deg"). The first draft concatenated them ("SAD_444k_mismatch") because inline elements collapse inter-element whitespace; fixed with an `ml-1` margin class, not a leading space, which HTML would also collapse.
+  - Viewport check: ridge (orange-red) and valley (cyan) ports render on the purple catastrophe ring, matching the ascent/descent seed stubs from Entry 035.
+- **The tuning finding, and it contradicts the obvious intuition**: raising Ring Samples from 48 to 88 made the search **worse** -- fewer saddles seeded (10 -> 9), more expansions (0 -> 6), more mismatches (2 -> 3). Finer azimuthal sampling resolves IDW interpolation noise as additional spurious extrema, inflating the measured k. This is the direct consequence of the Entry 031 measurement: at a tight ring the interpolated profile carries **3.6x the high-frequency content of the true field**, so sampling it more densely samples more noise.
+  - The practical rule: **the residual error is an interpolation limit, not a sampling limit.** Raising `ring_samples` cannot buy accuracy; expanding the radius can, because the IDW error falls from 7.3% of field span at 1.6 deg to 0.5% at 20 deg. 48 is a reasonable default and the slider is for exploring the ceiling, not for beating it.
+- **Validation**: `uv run pytest`: **403 passed**. `ruff format` / `ruff check` / `mypy gba_topology2/ tests/`: clean.

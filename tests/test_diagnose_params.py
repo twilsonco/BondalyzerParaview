@@ -86,7 +86,6 @@ def _make_ctx(**overrides: Any) -> RunContext:
         "nudge_cp_positions": False,
         "perfect_port_angles": False,
         "nudge_max_pitch": 1.5,
-        "launch_seed_pitch": 0.35,
         "ring_samples": 48,
         "ring_expand_pitch": 1.0,
         "ring_max_pitch": 12.0,

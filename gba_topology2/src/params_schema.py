@@ -91,13 +91,11 @@ DEFAULT_UI_STATE: dict[str, Any] = {
     "nudge_cp_positions": False,
     "perfect_port_angles": False,
     "nudge_max_pitch": 1.5,
-    # Basin Locator Step 2: saddle separatrix launch seeds
+    # Basin Locator Step 2: saddle separatrix launch seeds. The seeds launch from
+    # each saddle's excision boundary, profiled at ring_samples azimuths and
+    # expanded by ring_expand_pitch * dtheta until the port signature is pure, up
+    # to ring_max_pitch * dtheta.
     "show_launch_seeds": False,
-    "launch_seed_pitch": 0.35,
-    # Excision ring geometry for the launch seeds. The ring is profiled at
-    # ring_samples azimuths, starting from the excision-radius rule and expanded
-    # by ring_expand_pitch * dtheta until its port signature is pure, up to
-    # ring_max_pitch * dtheta.
     "ring_samples": 48,
     "ring_expand_pitch": 1.0,
     "ring_max_pitch": 12.0,
