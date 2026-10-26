@@ -1263,3 +1263,39 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   - `uv run ruff format` / `ruff check`: clean. `uv run mypy gba_topology2/ tests/`: no issues in 50 files.
 - **Environment note**: `uv run mypy .` is broken at baseline -- `BondalyzerParaView/plt_gba_to_vtm.py` is discovered twice under different module names, and those 2 errors abort the run before checking the rest. Confirmed pre-existing by stashing. Use `uv run mypy gba_topology2/ tests/` for this package.
 - **Open next**: parabolic port azimuth refinement (unit 2), then the pure `excision_launch.py` subroutine that consumes this locator.
+
+---
+
+### [Entry 031] Sub-Sample Port Azimuth Refinement (`excision_boundary.py`, `micro_cluster.py`)
+
+- **Objective**: Remove the azimuth quantization that makes a boundary port less angularly precise than the mesh it is derived from, so a port is a trustworthy launch point for separatrix integration.
+- **The problem, measured**: ring samples sit at a fixed pitch of `2*pi/48 = 7.5 deg`, and `extract_boundary_ports` snaps every port to a sample index. That is a worst-case error of **3.75 deg** -- **4.7x coarser than the 1.606 deg mesh pitch** the port is meant to resolve. The cyclic-link bisector it is replacing is *more* precise than this, so shipping the ring substrate unrefined would have been a regression in launch direction.
+- **Changes**:
+  - `extract_boundary_ports` / `profile_boundary_loop` take `refine_azimuth: bool = False`. When on, each accepted extremum is located between samples by fitting a parabola to the three smoothed points (`_refine_extremum`) and its position is re-evaluated **on the loop** at the refined azimuth, via the ring's own frame.
+  - `micro_cluster.ring_frame` (new, public): the analytic inverse of `generate_boundary_ring`, recovering `(c_unit, t1, t2, angular_radius)` from ring samples. This was the private `_ring_frame` inside `harmonic_nudge`; it is moved to `micro_cluster` because (a) it belongs beside the generator it inverts, and (b) `excision_boundary` cannot import from `harmonic_nudge` -- that is a cycle, since `harmonic_nudge` already imports from `excision_boundary`. Pure relocation, no behaviour change: the 330-test suite passed unchanged.
+  - The four duplicated `BoundaryPort(...)` construction blocks in `extract_boundary_ports` are consolidated into one `_port` builder.
+- **Design decisions**:
+  - **The prominence test stays on the discrete profile.** Refinement moves an accepted port between its bracketing samples; it must never change *which* ports are accepted. Pinning this as `test_refinement_preserves_port_counts_and_types` for k = 2, 3, 4.
+  - **The frame is recovered once per call and reused**, not re-derived per port.
+  - **`scalar_value` is not refined.** This routine sees only the profile, so a refined azimuth does not imply a re-interpolated scalar; callers that need it re-interpolate (as `reposition_ports_on_ring` already does).
+  - **Clamped to one sample step**, with a flat-stencil guard (`den ~ 0`) and non-finite guards, so a degenerate stencil keeps the sample.
+- **Empirical validation of the accuracy claim** (this is the part worth keeping):
+  - **Isolated, analytic** `cos(3(phi - phase))`, 48 samples, no mesh: mean max-error **3.750 deg -> 0.000-0.019 deg** across phases. The parabola is near-exact on a smooth profile, as expected.
+  - **Real 20174-node mesh, quadrupole, phase-swept** through 277 non-grid-aligned orientations (the fair test -- a sweep step equal to the 7.5 deg sample pitch makes every trial grid-aligned and shows snapped as *perfect*, which is an artifact, not a result):
+
+    | ring radius | snapped | refined | gain |
+    |---|---|---|---|
+    | 1.606 deg (1 dtheta) | 9.314 | 8.618 | 1.1x |
+    | 3.20 deg | 5.640 | 5.066 | 1.1x |
+    | 8.00 deg | 2.619 | 1.363 | 1.9x |
+    | 20.0 deg | 1.941 | 0.493 | 3.9x |
+
+  - **Refinement wins at every radius and every synthetic noise level tested** (0-10% of span). It never loses.
+- **The finding that matters for the expansion loop**: at a tight ring the gain is only 1.1x because **IDW interpolation noise dominates the quantization it removes**. Measured against the analytic field on a 20174-node sphere, IDW error is **7.3% of the field span at r = 1.6 deg**, and the high-frequency content of the *interpolated* profile is **3.6x that of the true profile** (1.38e-4 vs 3.79e-5) -- the interpolant is noisier than the signal it samples. At r = 20 deg the IDW error is 0.5% of span.
+  - This is independent evidence for the ring-expansion design: a ring at ~1 dtheta is inside the interpolation-noise regime, and expanding it buys real accuracy, not just topological cleanliness. It also bounds what refinement can do -- the residual at tight radii is an **interpolation** limit, not a sampling limit, so raising `ring_samples` will not fix it.
+  - Checked and rejected the obvious alternative: **barycentric interpolation on the mesh triangles is worse**, not better (32% of span vs 12.6% at r = 1.6 deg on a structured test mesh, and its profile noise tracks the triangle crossing pattern). The mesh triangles are long and thin near the poles, so linear interpolation across them is a poor fit for a smooth field.
+- **Validation**:
+  - `tests/test_excision_boundary.py`: 9 new tests (15 total) -- sub-degree phase recovery on an analytic field, refined strictly beats snapped, port counts/types/ordering preserved, refined positions lie on the small circle, reported azimuth consistent with reported position in the ring's own frame, default-off is byte-identical, flat-stencil and clamp guards, and the flag threaded through `profile_boundary_loop` end-to-end on a real mesh.
+  - `uv run pytest`: **339 passed** (330 + 9).
+  - `uv run ruff format` / `ruff check`: clean. `uv run mypy gba_topology2/ tests/`: no issues in 50 files.
+- **Open next**: `excision_launch.py` (unit 3), the pure ring-to-seed subroutine, which will call `profile_boundary_loop(..., refine_azimuth=True)`.

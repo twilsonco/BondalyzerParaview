@@ -27,6 +27,7 @@ __all__ = [
     "compute_tangent_pca",
     "generate_boundary_ring",
     "generate_elliptical_boundary_ring",
+    "ring_frame",
 ]
 
 
@@ -222,6 +223,71 @@ def generate_elliptical_boundary_ring(
             )
         )
     return ring
+
+
+def ring_frame(
+    ring_points: list[BoundaryRingPoint],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """Recover the spherical frame of a boundary ring from its samples.
+
+    The analytic inverse of :func:`generate_boundary_ring`: given the samples,
+    return ``(c_unit, t1, t2, angular_radius_rad)`` such that a point on the loop
+    at azimuth ``phi`` is
+
+        p(phi) = R * [cos(a) * c + sin(a) * (cos(phi) * t1 + sin(phi) * t2)]
+
+    Exact for circular rings. For an elliptical ring, whose angular radius varies
+    with ``phi``, it recovers the mean radius and the principal frame, which is
+    the best circular approximation of the loop.
+
+    Args:
+        ring_points: Ordered ring samples carrying ``phi_rad`` and ``position``.
+
+    Returns:
+        Tuple of (c_unit, t1, t2, angular_radius_rad).
+
+    Raises:
+        ValueError: If fewer than four ring samples are supplied.
+    """
+    if len(ring_points) < 4:
+        raise ValueError("Need at least 4 ring points to recover a ring frame")
+
+    pts = np.array([rp.position for rp in ring_points], dtype=np.float64)
+    pts_unit = pts / np.linalg.norm(pts, axis=1, keepdims=True)
+
+    c_unit = pts_unit.sum(axis=0)
+    n_c = float(np.linalg.norm(c_unit))
+    c_unit = c_unit / n_c if n_c > 1e-12 else np.array([0.0, 0.0, 1.0])
+
+    # Angular radius: mean angle of ring samples from the ring center
+    cos_a = float(np.clip(np.mean(pts_unit @ c_unit), -1.0, 1.0))
+    ang_radius = math.acos(cos_a)
+
+    phis = np.array([rp.phi_rad for rp in ring_points], dtype=np.float64)
+
+    def _tangent_at(target_phi: float) -> np.ndarray:
+        idx = int(np.argmin(np.abs(np.angle(np.exp(1j * (phis - target_phi))))))
+        vec = pts_unit[idx] - cos_a * c_unit
+        nrm = float(np.linalg.norm(vec))
+        return vec / nrm if nrm > 1e-12 else np.zeros(3)
+
+    t1 = _tangent_at(0.0)
+    if float(np.linalg.norm(t1)) < 1e-12:
+        v_tmp = (
+            np.array([0.0, 0.0, 1.0])
+            if abs(float(c_unit[2])) < 0.9
+            else np.array([1.0, 0.0, 0.0])
+        )
+        t1 = np.cross(c_unit, v_tmp)
+        t1 /= np.linalg.norm(t1)
+
+    t2 = np.cross(c_unit, t1)
+    t2 /= np.linalg.norm(t2)
+    # Enforce the ring's own orientation (counter-clockwise about c_unit)
+    if float(np.dot(_tangent_at(math.pi / 2.0), t2)) < 0.0:
+        t2 = -t2
+
+    return c_unit, t1, t2, ang_radius
 
 
 def compute_tangent_pca(

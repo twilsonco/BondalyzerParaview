@@ -24,7 +24,7 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
-from gba_topology2.src.micro_cluster import BoundaryRingPoint
+from gba_topology2.src.micro_cluster import BoundaryRingPoint, ring_frame
 
 __all__ = [
     "BoundaryPort",
@@ -229,11 +229,52 @@ def interpolate_scalar_at_points_local(
     return out
 
 
+def _refine_extremum(
+    smooth_vals: npt.NDArray[np.float64],
+    idx: int,
+    n: int,
+    dphi_step: float,
+) -> float:
+    """Locate a 1D extremum between samples by fitting a parabola to three points.
+
+    Ring samples sit at a fixed angular pitch, so a port snapped to a sample index
+    carries a quantization error of up to half that pitch -- 3.75 deg at 48 samples,
+    which is coarser than the 1.6 deg mesh pitch the port is meant to resolve. A
+    parabola through the extremum and its two periodic neighbours recovers the
+    vertex to sub-sample precision for any smooth profile.
+
+    Args:
+        smooth_vals: Smoothed periodic profile.
+        idx: Index of the accepted discrete extremum.
+        n: Profile length, for periodic wrap.
+        dphi_step: Angular spacing between samples, in radians.
+
+    Returns:
+        Azimuth offset from ``idx``, in radians, signed along increasing ``phi``.
+        Clamped to one sample step, so a degenerate stencil can never move a port
+        outside the cells that bracket it; zero when the stencil is flat.
+    """
+    y_m = float(smooth_vals[(idx - 1) % n])
+    y_0 = float(smooth_vals[idx])
+    y_p = float(smooth_vals[(idx + 1) % n])
+
+    den = y_m - 2.0 * y_0 + y_p
+    if abs(den) < 1e-300:
+        # Flat three-point stencil: the parabola is degenerate, keep the sample.
+        return 0.0
+
+    dphi = 0.5 * dphi_step * (y_m - y_p) / den
+    if not math.isfinite(dphi):
+        return 0.0
+    return max(-dphi_step, min(dphi_step, dphi))
+
+
 def extract_boundary_ports(
     profile_values: list[float],
     ring_points: list[BoundaryRingPoint],
     smoothing_window: int = 3,
     min_prominence_frac: float = 0.05,
+    refine_azimuth: bool = False,
 ) -> tuple[list[BoundaryPort], list[BoundaryPort]]:
     """Detect alternating local minima (valleys) and maxima (ridges) on a closed periodic 1D profile.
 
@@ -242,6 +283,9 @@ def extract_boundary_ports(
         ring_points: Corresponding BoundaryRingPoint objects.
         smoothing_window: Moving average window for noise reduction (odd int, default 3).
         min_prominence_frac: Minimum peak/valley prominence fraction of profile span (default 0.05).
+        refine_azimuth: When True, locate each port between samples by parabolic
+            interpolation and place it back on the loop at that sub-sample azimuth
+            (default False, which snaps ports to sample indices).
 
     Returns:
         Tuple of (valley_ports, ridge_ports).
@@ -253,6 +297,31 @@ def extract_boundary_ports(
     vals = np.array(profile_values, dtype=np.float64)
     v_span = float(np.ptp(vals))
     min_prominence = max(v_span * min_prominence_frac, 1e-12)
+
+    # Sub-sample placement needs the loop's frame, recovered once and reused.
+    dphi_step = 2.0 * math.pi / float(n)
+    frame: tuple[np.ndarray, np.ndarray, np.ndarray, float, float] | None = None
+    if refine_azimuth:
+        c_unit, t1, t2, ang_radius = ring_frame(ring_points)
+        r_ring = float(np.linalg.norm(ring_points[0].position))
+        frame = (c_unit, t1, t2, ang_radius, r_ring)
+
+    def _placed(idx: int, dphi: float) -> tuple[float, tuple[float, float, float]]:
+        """Return the refined azimuth and its on-loop position for sample ``idx``."""
+        phi = ring_points[idx].phi_rad + dphi
+        if frame is None:
+            return phi, ring_points[idx].position
+        c_unit, t1, t2, ang_radius, r_ring = frame
+        cos_a, sin_a = math.cos(ang_radius), math.sin(ang_radius)
+        vec = cos_a * c_unit + sin_a * (math.cos(phi) * t1 + math.sin(phi) * t2)
+        norm = float(np.linalg.norm(vec))
+        if norm > 1e-12:
+            vec = vec / norm
+        return phi, (
+            float(vec[0] * r_ring),
+            float(vec[1] * r_ring),
+            float(vec[2] * r_ring),
+        )
 
     # Periodic moving-average smoothing if requested
     if 1 < smoothing_window < n:
@@ -280,6 +349,29 @@ def extract_boundary_ports(
             raw_max_indices.append(i)
 
     # Step 2: Filter by true topological prominence (peak-to-valley amplitude)
+    def _port(idx: int, kind: str, seq: int) -> BoundaryPort:
+        """Build one port, refined to a sub-sample azimuth when requested.
+
+        The prominence test stays on the discrete profile: refinement moves an
+        accepted port between its bracketing samples, it must never change which
+        ports are accepted.
+        """
+        dphi = 0.0
+        if frame is not None:
+            dphi = _refine_extremum(smooth_vals, idx, n, dphi_step)
+        phi, pos = _placed(idx, dphi)
+        return BoundaryPort(
+            port_id=f"{'VPORT' if kind == 'valley' else 'RPORT'}_{seq}",
+            port_type=kind,
+            phi_rad=phi,
+            phi_deg=float(math.degrees(phi)),
+            position=pos,
+            # The sampled value at the bracketing index: this routine sees only
+            # the profile, so a refined azimuth does not imply a re-interpolated
+            # scalar. Callers that need it re-interpolate.
+            scalar_value=float(vals[idx]),
+        )
+
     # For each raw minimum, compute height difference relative to adjacent raw maxima
     valleys: list[BoundaryPort] = []
     for idx in raw_min_indices:
@@ -288,29 +380,9 @@ def extract_boundary_ports(
             max_vals = [float(smooth_vals[m]) for m in raw_max_indices]
             peak_height = max(max_vals) - v_curr
             if peak_height >= min_prominence or v_span < 1e-12:
-                rp = ring_points[idx]
-                valleys.append(
-                    BoundaryPort(
-                        port_id=f"VPORT_{len(valleys) + 1}",
-                        port_type="valley",
-                        phi_rad=rp.phi_rad,
-                        phi_deg=float(math.degrees(rp.phi_rad)),
-                        position=rp.position,
-                        scalar_value=float(vals[idx]),
-                    )
-                )
+                valleys.append(_port(idx, "valley", len(valleys) + 1))
         else:
-            rp = ring_points[idx]
-            valleys.append(
-                BoundaryPort(
-                    port_id=f"VPORT_{len(valleys) + 1}",
-                    port_type="valley",
-                    phi_rad=rp.phi_rad,
-                    phi_deg=float(math.degrees(rp.phi_rad)),
-                    position=rp.position,
-                    scalar_value=float(vals[idx]),
-                )
-            )
+            valleys.append(_port(idx, "valley", len(valleys) + 1))
 
     # For each raw maximum, compute height above valleys
     ridges: list[BoundaryPort] = []
@@ -320,29 +392,9 @@ def extract_boundary_ports(
             min_vals = [float(smooth_vals[m]) for m in raw_min_indices]
             valley_depth = v_curr - min(min_vals)
             if valley_depth >= min_prominence or v_span < 1e-12:
-                rp = ring_points[idx]
-                ridges.append(
-                    BoundaryPort(
-                        port_id=f"RPORT_{len(ridges) + 1}",
-                        port_type="ridge",
-                        phi_rad=rp.phi_rad,
-                        phi_deg=float(math.degrees(rp.phi_rad)),
-                        position=rp.position,
-                        scalar_value=float(vals[idx]),
-                    )
-                )
+                ridges.append(_port(idx, "ridge", len(ridges) + 1))
         else:
-            rp = ring_points[idx]
-            ridges.append(
-                BoundaryPort(
-                    port_id=f"RPORT_{len(ridges) + 1}",
-                    port_type="ridge",
-                    phi_rad=rp.phi_rad,
-                    phi_deg=float(math.degrees(rp.phi_rad)),
-                    position=rp.position,
-                    scalar_value=float(vals[idx]),
-                )
-            )
+            ridges.append(_port(idx, "ridge", len(ridges) + 1))
 
     return valleys, ridges
 
@@ -353,6 +405,7 @@ def profile_boundary_loop(
     f_vals: npt.NDArray[np.floating[Any]],
     smoothing_window: int = 3,
     min_prominence_frac: float = 0.05,
+    refine_azimuth: bool = False,
 ) -> ExcisionBoundaryResult:
     """Profile a 1D excision boundary loop, extract ports, and compute implied Euler index.
 
@@ -362,6 +415,8 @@ def profile_boundary_loop(
         f_vals: (N,) scalar field values.
         smoothing_window: Moving average smoothing window (default 3).
         min_prominence_frac: Prominence threshold fraction (default 0.05).
+        refine_azimuth: When True, ports are located between ring samples by
+            parabolic interpolation (default False, which snaps them to samples).
 
     Returns:
         ExcisionBoundaryResult with profile values, valley ports, ridge ports,
@@ -391,6 +446,7 @@ def profile_boundary_loop(
         ring_points=ring_points,
         smoothing_window=smoothing_window,
         min_prominence_frac=min_prominence_frac,
+        refine_azimuth=refine_azimuth,
     )
 
     k_valleys = len(valleys)
