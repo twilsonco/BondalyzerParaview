@@ -93,7 +93,7 @@ class ExpansionOutcome:
     Attributes:
         seed: The converged seed, or the last seed attempted on failure.
         status: ``"converged_at_a0"``, ``"expanded"``, ``"unbalanced"``,
-            ``"k_mismatch"``, ``"k_overshoot"`` or ``"no_ring"``.
+            ``"k_mismatch"`` or ``"no_ring"``.
         radii_tried: Number of ring radii profiled.
         a_final_rad: Radius the search stopped at.
         observed_k: Fold order measured at the tightest balanced radius, 0 if the
@@ -149,18 +149,21 @@ def expand_excision_seed(
     """Expand a saddle's excision ring until its port signature is pure.
 
     Accepts at the first radius that is balanced, has fold order equal to
-    ``expected_k``, and has ``k >= 2``. Stops early once a balanced ring reports
-    ``k > expected_k`` **at two consecutive radii**: the port count grows roughly
-    monotonically with radius, so a sustained overshoot means the target is
-    unreachable and continuing would profile up to a dozen more rings per saddle
-    for a guaranteed failure.
+    ``expected_k``, and has ``k >= 2``. Stops early once two **consecutive** radii
+    agree on the same ``k > expected_k``: the measurement has stabilised, so the
+    target is unreachable and continuing would profile up to a dozen more rings
+    per saddle for a guaranteed failure.
 
-    The overshoot must be sustained because the monotonicity assumption fails
-    where the profile is noise-dominated. At a tight ring the IDW error is a large
-    fraction of the field span, and that noise inflates the port count: a k = 3
-    monkey saddle read at 0.8 deg reports k = 4, then k = 3 correctly at 2 deg. A
-    single spike is the ring being too tight, which is what expanding fixes, so
-    one radius of grace is required before the search gives up.
+    Two consecutive readings are required because the port count is not monotone
+    in radius where the profile is noise-dominated. At a tight ring the IDW error
+    is a large fraction of the field span, and that noise inflates the count: a
+    k = 3 monkey saddle read at 0.8 deg reports k = 4, then k = 3 correctly at 2
+    deg. A single spike is the ring being too tight, which is what expanding
+    fixes. A count that repeats at a larger radius is not noise, and it is a
+    genuine disagreement with the index the reduction reported -- so the search
+    returns ``k_mismatch``, not a separate overshoot class. Measured on Pd_20K,
+    every sustained overshoot was stable across the whole 3-19 deg range, which is
+    what makes "overshoot" and "index disagreement" the same event.
 
     Args:
         request: The saddle and its initial ring.
@@ -213,7 +216,7 @@ def expand_excision_seed(
         radii = [a0]
 
     best_k_at_balance = 0
-    overshoot_streak = 0
+    previous_k = 0
     last_seed: SaddleLaunchSeed | None = None
     last_radius = a0
 
@@ -249,30 +252,33 @@ def expand_excision_seed(
         if best_k_at_balance == 0:
             best_k_at_balance = seed.fold_order
 
-        if seed.fold_order == request.expected_k:
+        measured = seed.fold_order
+        if measured == request.expected_k:
             status = "converged_at_a0" if tried == 1 else "expanded"
             return ExpansionOutcome(
-                seed, status, tried, radius, seed.fold_order, request.expected_k
+                seed, status, tried, radius, measured, request.expected_k
             )
 
-        if seed.fold_order > request.expected_k:
-            overshoot_streak += 1
-            if overshoot_streak >= 2:
+        if measured > request.expected_k:
+            # A single overshoot at a tight ring is usually interpolation noise
+            # inflating the port count, not a real k, so it is not yet evidence.
+            # Two consecutive radii agreeing on the same inflated count is: the
+            # measurement has stabilised, and it disagrees with the index.
+            if measured == previous_k:
                 return ExpansionOutcome(
                     seed,
-                    "k_overshoot",
+                    "k_mismatch",
                     tried,
                     radius,
-                    best_k_at_balance,
+                    measured,
                     request.expected_k,
                 )
-            # A single overshoot at a tight ring is usually interpolation noise
-            # inflating the port count, not a real k. Expand once more and see.
+            previous_k = measured
             continue
-        # k == expected_k returned above; k < expected_k keeps expanding, more
-        # lobes may resolve at a larger radius. Reset the streak so only a
-        # sustained overshoot terminates the search.
-        overshoot_streak = 0
+        # k < expected_k: keep expanding, more lobes may resolve at a larger
+        # radius. A drop resets the stability pair, so only two consecutive
+        # equal readings terminate the search.
+        previous_k = 0
 
     observed = best_k_at_balance
     status = "k_mismatch" if observed > 0 else "unbalanced"
@@ -317,7 +323,6 @@ def summarize_outcomes(outcomes: list[ExpansionOutcome]) -> dict[str, Any]:
         "n_rings_expanded": 0,
         "n_rings_unbalanced": 0,
         "n_rings_k_mismatch": 0,
-        "n_rings_k_overshoot": 0,
         "n_rings_no_ring": 0,
     }
     failures: list[dict[str, Any]] = []
@@ -333,8 +338,6 @@ def summarize_outcomes(outcomes: list[ExpansionOutcome]) -> dict[str, Any]:
             counts["n_rings_unbalanced"] += 1
         elif o.status == "k_mismatch":
             counts["n_rings_k_mismatch"] += 1
-        elif o.status == "k_overshoot":
-            counts["n_rings_k_overshoot"] += 1
         elif o.status == "no_ring":
             counts["n_rings_no_ring"] += 1
 

@@ -84,6 +84,11 @@ from gba_topology2.src.excision_boundary import (
     KNearestFinder,
     profile_boundary_loop,
 )
+from gba_topology2.src.excision_launch_seeds import (
+    SeedRequest,
+    expand_excision_seed,
+    summarize_outcomes,
+)
 from gba_topology2.src.harmonic_nudge import (
     harmonic_nudge_critical_point,
     perfect_boundary_ports,
@@ -114,10 +119,7 @@ from gba_topology2.src.polarity_detector import (
     classify_cluster_polarity,
     effective_reduction_decision,
 )
-from gba_topology2.src.saddle_launch import (
-    SaddleLaunchSeed,
-    compute_all_saddle_launch_seeds,
-)
+from gba_topology2.src.saddle_launch import SaddleLaunchSeed
 from gba_topology2.src.sphere_frame import (
     compute_atom_frame,
     radial_offset,
@@ -923,6 +925,82 @@ def effective_cp_to_ui(
     }
 
 
+def build_launch_requests(
+    saddles: list[CriticalPoint],
+    effective_cps: list[dict[str, Any]],
+    hidden_vertex_ids: set[int],
+    eff_ring_radius: dict[str, float],
+    center: tuple[float, float, float],
+    delta_theta_mesh_rad: float,
+    k_pitch: float,
+) -> list[SeedRequest]:
+    """Build one excision-ring seed request per saddle the operator can see.
+
+    The set is the **displayed** saddles, not the raw Morse output: a raw saddle
+    absorbed by catastrophe fusion or a cluster reduction has no glyph, so
+    seeding it would launch separatrices from a point the reduction replaced.
+    Effective saddles are included, which is the whole reason the seeds are read
+    off an excision boundary -- the cyclic-link scan needs a ``vertex_id`` and an
+    effective CP has none.
+
+    Args:
+        saddles: Raw saddle critical points, in the centred atom frame.
+        effective_cps: Effective CP UI dicts. Positions are **world frame** (the
+            builder mapped them) and are the nudged centre when the nudge is on.
+        hidden_vertex_ids: Raw vertices collapsed by reduction; excluded.
+        eff_ring_radius: Initial excision radius per effective CP, keyed by
+            ``id_label``. Falls back to the lone-critical-point rule when absent.
+        center: World-frame nucleus, used to map effective positions back to the
+            centred frame the algorithms work in.
+        delta_theta_mesh_rad: Intrinsic angular mesh pitch.
+        k_pitch: Micro-clustering pitch multiplier, which sets the floor of the
+            lone-critical-point excision-radius rule.
+
+    Returns:
+        One :class:`SeedRequest` per visible saddle, raw first then effective,
+        each carrying the fold order the reduction reports for it.
+    """
+    # The excision-radius rule for a lone critical point: the boundary margin, or
+    # half the clustering threshold, whichever is larger.
+    lone_a0 = max(math.radians(1.5), k_pitch * delta_theta_mesh_rad / 2.0)
+
+    requests: list[SeedRequest] = []
+    for sd in saddles:
+        if sd.vertex_id in hidden_vertex_ids:
+            continue
+        requests.append(
+            SeedRequest(
+                saddle_id=f"SAD_{sd.vertex_id}",
+                centre=sd.position,
+                saddle_value=sd.value,
+                expected_k=int(sd.multiplicity) + 1,
+                a0_rad=lone_a0,
+                vertex_id=sd.vertex_id,
+                multiplicity=int(sd.multiplicity),
+            )
+        )
+
+    for eff in effective_cps:
+        if eff["type"] != "E-SAD":
+            continue
+        # The ring is generated fresh at this centre, so it sits on the effective
+        # saddle -- including the nudged position -- rather than on the pre-nudge
+        # centroid the constellation stored.
+        centre = to_local(tuple(eff["position"]), center)
+        requests.append(
+            SeedRequest(
+                saddle_id=str(eff["id_label"]),
+                centre=(float(centre[0]), float(centre[1]), float(centre[2])),
+                saddle_value=float(eff["value"]),
+                expected_k=int(eff["fold_order"]),
+                a0_rad=eff_ring_radius.get(str(eff["id_label"]), lone_a0),
+                vertex_id=-1,
+                multiplicity=0,
+            )
+        )
+    return requests
+
+
 @dataclass
 class ViewerSession:
     """The mesh-bound state of the viewer for one atom of one file.
@@ -1548,13 +1626,7 @@ def run_sphere_viewer(
     state.clusters_list = []
     state.catastrophes_list = []
     state.basin_centers_list = []
-    state.launch_stats = {
-        "n_saddles_seeded": 0,
-        "n_ascent": 0,
-        "n_descent": 0,
-        "n_index_mismatch": 0,
-        "max_fold_order": 0,
-    }
+    state.launch_stats = summarize_outcomes([])
     state.selected_cp = None
     state.selected_cluster = None
     state.selected_catastrophe = None
@@ -1790,6 +1862,10 @@ def run_sphere_viewer(
         # carried by its core cluster. See fusable_catastrophes.
         hidden_vertex_ids: set[int] = set()
         effective_cps_ui: list[dict[str, Any]] = []
+        # Initial excision radius per effective CP, keyed by id_label. The ring
+        # must enclose the whole collapsed set, so it comes from the set's own
+        # boundary; Step 9 generates it fresh at the (possibly nudged) centre.
+        eff_ring_radius: dict[str, float] = {}
         n_cats_reduced = 0
         n_clusts_reduced = 0
         n_clusts_annihilated = 0
@@ -1882,9 +1958,10 @@ def run_sphere_viewer(
                 eff_val = (
                     max(m.value for m in cat.all_members) if cat.all_members else 0.0
                 )
+                cat_entity_id = f"E-SAD_{cat.entity_id}"
                 effective_cps_ui.append(
                     effective_cp_to_ui(
-                        entity_id=f"E-SAD_{cat.entity_id}",
+                        entity_id=cat_entity_id,
                         eff_type="E-SAD",
                         position=eff_pos,
                         value=eff_val,
@@ -1897,6 +1974,7 @@ def run_sphere_viewer(
                         center=session.center,
                     )
                 )
+                eff_ring_radius[cat_entity_id] = cat.angular_radius_rad
                 for m in cat.all_members:
                     hidden_vertex_ids.add(m.vertex_id)
                 n_cats_reduced += 1
@@ -2037,9 +2115,10 @@ def run_sphere_viewer(
                     nudge_degs.append(cl_nudge.displacement_ang_deg)
                 else:
                     eff_pos = unit.centroid
+                unit_entity_id = f"{eff_type}_{unit.unit_id}"
                 effective_cps_ui.append(
                     effective_cp_to_ui(
-                        entity_id=f"{eff_type}_{unit.unit_id}",
+                        entity_id=unit_entity_id,
                         eff_type=eff_type,
                         position=eff_pos,
                         value=eff_val,
@@ -2054,6 +2133,7 @@ def run_sphere_viewer(
                         center=session.center,
                     )
                 )
+                eff_ring_radius[unit_entity_id] = unit.as_cluster.angular_radius_rad
                 for m in unit.members:
                     hidden_vertex_ids.add(m.vertex_id)
                 n_clusts_reduced += 1
@@ -2202,26 +2282,46 @@ def run_sphere_viewer(
                 select_basin_center(None)
 
         # 9. Saddle separatrix launch seeds (Basin Locator - Step 2)
-        # Extracted for every visible saddle, including effective saddles, whose
-        # centre replaces the degenerate core of the constellation it collapsed.
-        launch_saddles = [
-            cp for cp in morse_res.saddles if cp.vertex_id not in hidden_vertex_ids
-        ]
-        launch_pitch = float(state.launch_seed_pitch)
-        seeds = compute_all_saddle_launch_seeds(
-            saddles=launch_saddles,
-            mesh_pts=session.pts_np,
-            triangles=session.triangles_np,
-            f_vals=f_vals_np,
-            sphere_radius=session.sphere_radius,
-            delta_theta_mesh_rad=session.delta_theta_rad,
-            launch_step_pitch=launch_pitch,
+        # Extracted for every saddle the operator can actually see: the raw
+        # saddles that survived reduction, plus every effective saddle, whose
+        # centre replaces the degenerate core of the set it collapsed.
+        #
+        # The seeds are read off each saddle's excision boundary, not off a mesh
+        # vertex. The cyclic-link scan in saddle_launch needs a vertex_id to walk
+        # the incident-triangle graph, and an effective CP has none -- its
+        # position is a mean of member directions, optionally nudged. The
+        # excision loop is defined for any point on the sphere, which is what
+        # makes it the substrate that covers the reduced set.
+        dtheta = session.delta_theta_rad
+        launch_requests = build_launch_requests(
+            saddles=morse_res.saddles,
+            effective_cps=effective_cps_ui,
+            hidden_vertex_ids=hidden_vertex_ids,
+            eff_ring_radius=eff_ring_radius,
+            center=session.center,
+            delta_theta_mesh_rad=dtheta,
+            k_pitch=float(state.k_pitch),
         )
+
+        outcomes = [
+            expand_excision_seed(
+                request=req,
+                mesh_pts=session.pts_np,
+                f_vals=f_vals_np,
+                sphere_radius=session.sphere_radius,
+                delta_theta_mesh_rad=dtheta,
+                find_k_nearest=session.locator,
+                expand_pitch=float(state.ring_expand_pitch),
+                max_radius_pitch=float(state.ring_max_pitch),
+                num_samples=int(state.ring_samples),
+            )
+            for req in launch_requests
+        ]
+        seeds = [o.seed for o in outcomes if o.converged]
+        launch_summary = summarize_outcomes(outcomes)
 
         a_pts, a_lines = vtkPoints(), vtkCellArray()
         d_pts, d_lines = vtkPoints(), vtkCellArray()
-        n_ascent = n_descent = n_mismatch = 0
-        max_fold = 0
 
         def _emit_branch(
             seed: SaddleLaunchSeed,
@@ -2239,15 +2339,10 @@ def run_sphere_viewer(
             lines.InsertCellPoint(base + 1)
 
         for seed in seeds:
-            max_fold = max(max_fold, seed.fold_order)
-            if not seed.index_agrees and seed.fold_order > 0:
-                n_mismatch += 1
             for br in seed.ascent_branches:
                 _emit_branch(seed, br, a_lines, a_pts)
-                n_ascent += 1
             for br in seed.descent_branches:
                 _emit_branch(seed, br, d_lines, d_pts)
-                n_descent += 1
 
         launch_ascent_poly.SetPoints(a_pts)
         launch_ascent_poly.SetLines(a_lines)
@@ -2257,16 +2352,12 @@ def run_sphere_viewer(
         launch_descent_poly.Modified()
 
         show_seeds = bool(state.show_launch_seeds)
+        n_ascent = int(launch_summary["n_ascent"])
+        n_descent = int(launch_summary["n_descent"])
         launch_ascent_actor.SetVisibility(show_seeds and n_ascent > 0)
         launch_descent_actor.SetVisibility(show_seeds and n_descent > 0)
 
-        state.launch_stats = {
-            "n_saddles_seeded": len(seeds),
-            "n_ascent": n_ascent,
-            "n_descent": n_descent,
-            "n_index_mismatch": n_mismatch,
-            "max_fold_order": max_fold,
-        }
+        state.launch_stats = launch_summary
 
         n_raw_hidden = len(hidden_vertex_ids)
         state.display_counts = {

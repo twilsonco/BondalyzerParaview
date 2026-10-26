@@ -16,6 +16,8 @@ from typing import Any
 
 import numpy as np
 import pytest
+from vtkmodules.vtkCommonCore import vtkPoints
+from vtkmodules.vtkCommonDataModel import vtkPolyData
 
 from gba_topology2.diagnose_params import (
     STAGES,
@@ -26,6 +28,17 @@ from gba_topology2.diagnose_params import (
     diff_metrics,
     run_stages,
 )
+from gba_topology2.src.point_locator import make_kdtree_nearest_finder
+
+
+def _poly_from_points(pts: np.ndarray) -> vtkPolyData:
+    """Wrap an (N, 3) array as a point-only vtkPolyData for the locator."""
+    vp = vtkPoints()
+    for p in pts:
+        vp.InsertNextPoint(float(p[0]), float(p[1]), float(p[2]))
+    poly = vtkPolyData()
+    poly.SetPoints(vp)
+    return poly
 
 
 def _make_ctx(**overrides: Any) -> RunContext:
@@ -74,6 +87,9 @@ def _make_ctx(**overrides: Any) -> RunContext:
         "perfect_port_angles": False,
         "nudge_max_pitch": 1.5,
         "launch_seed_pitch": 0.35,
+        "ring_samples": 48,
+        "ring_expand_pitch": 1.0,
+        "ring_max_pitch": 12.0,
         "selected_field": "V (condensed)",
     }
     params.update(overrides)
@@ -93,6 +109,7 @@ def _make_ctx(**overrides: Any) -> RunContext:
         sphere_radius=1.0,
         delta_theta_rad=math.pi / 2.0,
         geom_info={"num_vertices": 6, "mesh_pitch_deg": 90.0},
+        locator=make_kdtree_nearest_finder(_poly_from_points(pts)),
     )
 
 

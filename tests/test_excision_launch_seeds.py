@@ -323,3 +323,47 @@ def test_seed_identity_fields_survive_the_search() -> None:
     assert seed.index_agrees is True
     assert seed.failure_reason is None
     assert seed.ring_radius_rad == pytest.approx(math.radians(20.0), abs=1e-9)
+
+
+def test_single_noisy_overshoot_does_not_terminate_the_search() -> None:
+    """One inflated reading is the ring being too tight; the search must continue.
+
+    At a tight ring the IDW error inflates the port count, so a k = 3 saddle can
+    read k = 4 at its first radius and k = 3 one step later. Terminating on the
+    first reading would abandon a search that succeeds immediately after.
+    """
+    out = _expand(3, 0.8, MONKEY)
+    assert out.converged, f"status={out.status}"
+    assert out.seed.fold_order == 3
+    assert out.radii_tried >= 2
+
+
+def test_stable_overshoot_is_diagnosed_as_index_mismatch() -> None:
+    """A count that repeats at a larger radius is a real disagreement, not noise.
+
+    Two consecutive radii agreeing on k = 3 for a saddle the reduction calls
+    k = 2 means the measurement has stabilised against the reported index. That
+    is the same event as a mismatch found any other way, so it shares the status
+    and the counter -- there is no separate overshoot class.
+    """
+    out = _expand(2, 20.0, MONKEY)
+    assert out.status == "k_mismatch"
+    assert out.observed_k == 3
+    assert out.expected_k == 2
+    assert not out.converged
+    stats = summarize_outcomes([out])
+    assert stats["n_rings_k_mismatch"] == 1
+    assert "n_rings_k_overshoot" not in stats
+
+
+def test_k_mismatch_carries_the_stable_measurement_for_inspection() -> None:
+    """The failure record reports what the loop measured, so it can be audited."""
+    out = _expand(2, 20.0, MONKEY)
+    stats = summarize_outcomes([out])
+    failure = stats["failures"][0]
+    assert failure["status"] == "k_mismatch"
+    assert failure["observed_k"] == 3
+    assert failure["expected_k"] == 2
+    # The seed retained for diagnostics is the balanced one that was rejected.
+    assert out.seed.fold_order == 3
+    assert out.seed.index_agrees is False

@@ -14,7 +14,7 @@ Stages (viewer order, --only stops after the named one, inclusive):
     ports         profile_boundary_loop (+ perfect/reposition)
     reduction     Step 6 effective-CP reduction + harmonic nudge
     basins        extract_basin_centers
-    launch        compute_all_saddle_launch_seeds
+    launch        expand_excision_seed (excision-boundary launch seeds)
 
 The saved file's derived_metrics are diffed against the recomputed ones, so the
 run answers "does this parameter set reproduce what I saw?" with an exit code
@@ -52,7 +52,14 @@ from gba_topology2.src.catastrophe_classifier import (
     EffectiveCatastrophe,
     classify_catastrophes,
 )
-from gba_topology2.src.excision_boundary import profile_boundary_loop
+from gba_topology2.src.excision_boundary import (
+    KNearestFinder,
+    profile_boundary_loop,
+)
+from gba_topology2.src.excision_launch_seeds import (
+    expand_excision_seed,
+    summarize_outcomes,
+)
 from gba_topology2.src.harmonic_nudge import (
     harmonic_nudge_critical_point,
     perfect_boundary_ports,
@@ -65,14 +72,12 @@ from gba_topology2.src.morse_detector import (
     MorseDetectionResult,
     compute_discrete_morse_cps,
 )
+from gba_topology2.src.point_locator import make_kdtree_nearest_finder
 from gba_topology2.src.polarity_detector import (
     classify_cluster_polarity,
     effective_reduction_decision,
 )
-from gba_topology2.src.saddle_launch import (
-    SaddleLaunchSeed,
-    compute_all_saddle_launch_seeds,
-)
+from gba_topology2.src.saddle_launch import SaddleLaunchSeed
 from gba_topology2.src.sphere_frame import to_global
 from gba_topology2.src.sphere_viewer import (
     PARAM_BOOL_KEYS,
@@ -80,6 +85,7 @@ from gba_topology2.src.sphere_viewer import (
     PARAM_FLOAT_KEYS,
     PARAM_STRING_KEYS,
     ReductionUnit,
+    build_launch_requests,
     build_reduction_units,
     catastrophe_claimed_cluster_ids,
     effective_cp_to_ui,
@@ -172,6 +178,8 @@ class RunContext:
     clusters_ui: list[dict[str, Any]] = field(default_factory=list)
     effective_cps: list[dict[str, Any]] = field(default_factory=list)
     hidden_vertex_ids: set[int] = field(default_factory=set)
+    eff_ring_radius: dict[str, float] = field(default_factory=dict)
+    locator: KNearestFinder | None = None
     reduction_stats: dict[str, Any] = field(default_factory=dict)
     display_counts: dict[str, Any] = field(default_factory=dict)
     basin_centers: list[BasinCenter] = field(default_factory=list)
@@ -477,6 +485,7 @@ def stage_reduction(ctx: RunContext) -> dict[str, Any]:
 
     hidden: set[int] = set()
     effs: list[dict[str, Any]] = []
+    eff_ring: dict[str, float] = {}
     n_cats = n_clusts = n_annul = n_irred = 0
     nudge_degs: list[float] = []
     pitch_deg = max(math.degrees(ctx.delta_theta_rad), 1e-9)
@@ -501,9 +510,10 @@ def stage_reduction(ctx: RunContext) -> dict[str, Any]:
             eff_pos = cat_nudge.optimized_position if cat_nudge else cat.centroid
             if cat_nudge is not None:
                 nudge_degs.append(cat_nudge.displacement_ang_deg)
+            cat_entity_id = f"E-SAD_{cat.entity_id}"
             effs.append(
                 effective_cp_to_ui(
-                    entity_id=f"E-SAD_{cat.entity_id}",
+                    entity_id=cat_entity_id,
                     eff_type="E-SAD",
                     position=eff_pos,
                     value=max((m.value for m in cat.all_members), default=0.0),
@@ -516,6 +526,7 @@ def stage_reduction(ctx: RunContext) -> dict[str, Any]:
                     center=ctx.center,
                 )
             )
+            eff_ring[cat_entity_id] = cat.angular_radius_rad
             hidden.update(m.vertex_id for m in cat.all_members)
             n_cats += 1
 
@@ -572,9 +583,10 @@ def stage_reduction(ctx: RunContext) -> dict[str, Any]:
             eff_pos = cl_nudge.optimized_position if cl_nudge else unit.centroid
             if cl_nudge is not None:
                 nudge_degs.append(cl_nudge.displacement_ang_deg)
+            unit_entity_id = f"{decision}_{unit.unit_id}"
             effs.append(
                 effective_cp_to_ui(
-                    entity_id=f"{decision}_{unit.unit_id}",
+                    entity_id=unit_entity_id,
                     eff_type=decision,
                     position=eff_pos,
                     value=eff_val,
@@ -589,6 +601,7 @@ def stage_reduction(ctx: RunContext) -> dict[str, Any]:
                     center=ctx.center,
                 )
             )
+            eff_ring[unit_entity_id] = unit.as_cluster.angular_radius_rad
             hidden.update(m.vertex_id for m in unit.members)
             n_clusts += 1
 
@@ -616,6 +629,7 @@ def stage_reduction(ctx: RunContext) -> dict[str, Any]:
 
     ctx.hidden_vertex_ids = hidden
     ctx.effective_cps = effs
+    ctx.eff_ring_radius = eff_ring
     ctx.display_counts = {
         "minima": n_min,
         "maxima": n_max,
@@ -683,27 +697,39 @@ def stage_basins(ctx: RunContext) -> dict[str, Any]:
 
 
 def stage_launch(ctx: RunContext) -> dict[str, Any]:
-    """Extract saddle separatrix launch seeds for the visible saddles."""
+    """Extract saddle separatrix launch seeds for the visible saddles.
+
+    Seeds are read off each saddle's excision boundary, so the set is the
+    *displayed* saddles: raw saddles that survived reduction plus every effective
+    saddle. The cyclic-link scan needs a vertex_id and an effective CP has none,
+    which is why the ring substrate covers a set the link scan could not.
+    """
     morse = ctx.require_morse()
-    visible = [s for s in morse.saddles if s.vertex_id not in ctx.hidden_vertex_ids]
-    ctx.seeds = compute_all_saddle_launch_seeds(
-        saddles=visible,
-        mesh_pts=ctx.pts,
-        triangles=ctx.triangles,
-        f_vals=ctx.f_vals,
-        sphere_radius=ctx.sphere_radius,
+    requests = build_launch_requests(
+        saddles=morse.saddles,
+        effective_cps=ctx.effective_cps,
+        hidden_vertex_ids=ctx.hidden_vertex_ids,
+        eff_ring_radius=ctx.eff_ring_radius,
+        center=ctx.center,
         delta_theta_mesh_rad=ctx.delta_theta_rad,
-        launch_step_pitch=float(_p(ctx, "launch_seed_pitch")),
+        k_pitch=float(_p(ctx, "k_pitch")),
     )
-    ctx.launch_stats = {
-        "n_saddles_seeded": len(ctx.seeds),
-        "n_ascent": sum(len(s.ascent_branches) for s in ctx.seeds),
-        "n_descent": sum(len(s.descent_branches) for s in ctx.seeds),
-        "n_index_mismatch": sum(
-            1 for s in ctx.seeds if not s.index_agrees and s.fold_order > 0
-        ),
-        "max_fold_order": max((s.fold_order for s in ctx.seeds), default=0),
-    }
+    outcomes = [
+        expand_excision_seed(
+            request=req,
+            mesh_pts=ctx.pts,
+            f_vals=ctx.f_vals,
+            sphere_radius=ctx.sphere_radius,
+            delta_theta_mesh_rad=ctx.delta_theta_rad,
+            find_k_nearest=ctx.locator,
+            expand_pitch=float(_p(ctx, "ring_expand_pitch")),
+            max_radius_pitch=float(_p(ctx, "ring_max_pitch")),
+            num_samples=int(_p(ctx, "ring_samples")),
+        )
+        for req in requests
+    ]
+    ctx.seeds = [o.seed for o in outcomes if o.converged]
+    ctx.launch_stats = summarize_outcomes(outcomes)
     return dict(ctx.launch_stats)
 
 
@@ -903,6 +929,7 @@ def build_context(
         sphere_radius=geom_info["sphere_radius"],
         delta_theta_rad=geom["mesh_pitch_rad"],
         geom_info=geom_info,
+        locator=make_kdtree_nearest_finder(sphere_poly),
     )
 
 

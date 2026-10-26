@@ -1388,3 +1388,38 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   - `uv run pytest`: **390 passed** (388 + 2). Params suites specifically: 76 passed, and the fixture test verified to PASS rather than skip.
   - `uv run ruff format` / `ruff check`: clean. `uv run mypy gba_topology2/ tests/`: no issues in 55 files.
 - **Open next**: the Step 9 rewire (unit 7), which consumes `ring_samples` / `ring_expand_pitch` / `ring_max_pitch` and retires `launch_seed_pitch`.
+
+---
+
+### [Entry 035] Step 9 Rewired to Excision-Boundary Seeds (`sphere_viewer.py`, `diagnose_params.py`)
+
+- **Objective**: Seed every **displayed** saddle from its excision boundary, so effective saddles -- which the cyclic-link scan structurally cannot serve -- get launch seeds.
+- **Changes**:
+  - `sphere_viewer.build_launch_requests` (new, module-level, pure): the seed-set rule. Raw saddles not in `hidden_vertex_ids`, plus every `E-SAD` from `effective_cps_ui`. Extracted from the `update_topology` closure so the rule is unit-testable without a viewer, per AGENTS.md Principle 1.
+  - Step 9 now builds `SeedRequest`s, runs `expand_excision_seed` over each, and takes `state.launch_stats` straight from `summarize_outcomes`. `compute_all_saddle_launch_seeds` is no longer imported by the viewer.
+  - `eff_ring_radius` records each effective CP's initial radius (constellation `angular_radius_rad`, or the unit's cluster radius), keyed by `id_label`.
+  - `diagnose_params`: `RunContext` gains `locator` and `eff_ring_radius`; `stage_launch` uses the same rule, so the headless harness and the viewer cannot drift.
+- **Effective saddles are centred correctly, including under the nudge**: the ring is generated fresh at `eff_dict["position"]`, which is the **nudged** centre, rather than reusing the constellation's stored ring, which is centred on the pre-nudge centroid. UI positions are world frame, so they are mapped back with `to_local` before the search.
+- **The finding that changed the failure taxonomy**: the first run on `Pd_20K` reported 36 `k_overshoot` failures. Diagnosing one (`SAD_5`, multiplicity 1, so expected k = 2) showed the ring reading **k = 3 stably from 3.2 deg all the way to 19.3 deg** -- not interpolation noise, and not a loose ceiling. That is a genuine disagreement with the index the Morse detector reported, which is exactly what `k_mismatch` means.
+  - So `k_overshoot` was **removed as a status**. A *sustained* overshoot is an index mismatch by definition; the two classes were the same event wearing different names. The search now terminates when **two consecutive radii agree** on the same inflated `k`, and returns `k_mismatch`.
+  - The two-consecutive-radii rule is still required, for the reason found in Entry 033: a *single* inflated reading at a tight ring is noise, and a k = 3 monkey saddle read at 0.8 deg recovers to k = 3 one step later. Verified: the stable path exits at `radii_tried = 2` of ~11 available, so the cost saving survives.
+  - Reclassifying also **raised the yield**: 164 -> 185 of 200 saddles seeded, because radii whose readings differ now continue expanding instead of terminating.
+- **`Pd_20K` (`V (condensed)`, 20174 nodes, dtheta = 1.606 deg)**:
+
+  | toggle set | reqs | seeded | conv@a0 | expanded | k_mismatch | mean radii | time |
+  |---|---|---|---|---|---|---|---|
+  | none | 200 raw | 185 | 118 | 67 | 15 | 1.73 | 0.84s |
+  | reduce_catastrophes | 194 raw + 2 E-SAD | 181 | 114 | 67 | 15 | 1.74 | 0.85s |
+  | cats + clusters | 18 raw + 2 E-SAD | 20 | 15 | 5 | 0 | 1.25 | 0.06s |
+
+  - **The 2 E-SADs converge at a0 with k = 3, 3 ascent + 3 descent, and `vertex_id = -1`** -- the case the rewrite exists for, and one the link scan silently dropped.
+  - 8 catastrophes detected, 2 fused; the 6 split ones are physical symmetry breaking and correctly stay as raw saddles.
+  - Cost is **0.84s for 200 rings** with the locator, against the 6.0s the global kernel alone would have taken for the same sampling.
+  - `n_rings_unbalanced = 0` everywhere: the tight-ring balance failure predicted in the plan did not materialise, because the expansion loop resolves it.
+- **The 15 `k_mismatch` findings are the audit working as designed.** Under the plan's `target_k` acceptance the ring constructs the index rather than measuring it; recording the stable measurement and reporting the disagreement is what preserved the check. These 15 are simple saddles whose excision loop consistently shows 3 ridge ports, and they are now visible in `launch_stats.failures` with id, expected/observed k, radii tried and final radius.
+- **Validation**:
+  - `tests/test_sphere_viewer_reduction.py`: 11 new tests on the seed-set rule -- visible raw saddles requested, hidden ones excluded, E-SADs included with `vertex_id = -1` and the constellation radius, E-MAX/E-MIN not seeded, `expected_k` from multiplicity for raw and `fold_order` for effective, the lone-CP radius rule (both the pitch floor and the 1.5 deg margin branches), `k_pitch` reaching the rule, world-to-centred mapping of effective centres, the fallback when no radius is recorded, and stable raw-then-effective ordering.
+  - `tests/test_excision_launch_seeds.py`: 3 new tests pinning the reclassified taxonomy -- a single noisy overshoot must not terminate, a stable one is `k_mismatch`, and `n_rings_k_overshoot` is gone.
+  - `tests/test_diagnose_params.py`: fixture gains the ring params and a real locator. The octahedron end-to-end still asserts `n_saddles_seeded == 2` and now yields 2 saddles x k = 2 = 4 ascent + 4 descent, converged at a0 -- a meaningful check on a 6-vertex, 90 deg-pitch mesh.
+  - `uv run pytest`: **403 passed**. `ruff format` / `ruff check` / `mypy gba_topology2/ tests/`: clean.
+- **Open next**: the sidebar (unit 8) -- `launch_seed_pitch` is now dead in the pipeline and must be replaced by the ring sliders and the failure list.

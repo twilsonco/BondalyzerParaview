@@ -13,6 +13,7 @@ from __future__ import annotations
 import math
 import pathlib
 import re
+from typing import Any
 
 import pytest
 
@@ -352,3 +353,208 @@ def test_fused_catastrophe_still_claims_its_clusters() -> None:
     fused = _make_cat("CAT_1", ["MC3"], is_fused=True)
 
     assert catastrophe_claimed_cluster_ids([fused], reduce_catastrophes=True) == {"MC3"}
+
+
+# ---------------------------------------------------------------------------
+# Step 9 seed-set rule: which saddles get excision-ring launch seeds.
+#
+# The set is the *displayed* saddles. A raw saddle absorbed by reduction has no
+# glyph, so seeding it launches separatrices from a point the reduction replaced;
+# an effective saddle has a glyph and no vertex_id, so it can only be seeded from
+# a loop. Both halves of that rule are pinned here.
+# ---------------------------------------------------------------------------
+
+
+def _raw_saddle(vertex_id: int, multiplicity: int = 1) -> CriticalPoint:
+    """A raw saddle at the north pole with a given multiplicity."""
+    return CriticalPoint(
+        vertex_id=vertex_id,
+        cp_type="saddle",
+        value=0.5,
+        position=(0.0, 0.0, 1.0),
+        multiplicity=multiplicity,
+    )
+
+
+def _eff_sad(
+    id_label: str,
+    fold_order: int,
+    position: tuple[float, float, float] = (0.0, 0.0, 1.0),
+) -> dict[str, Any]:
+    """An effective-saddle UI dict, world frame, as effective_cp_to_ui emits."""
+    return {
+        "id_label": id_label,
+        "type": "E-SAD",
+        "position": list(position),
+        "value": 0.25,
+        "fold_order": fold_order,
+        "net_index": 1 - fold_order,
+        "is_effective": True,
+    }
+
+
+def test_visible_raw_saddles_are_requested() -> None:
+    """Every raw saddle that survived reduction gets a request."""
+    reqs = sv.build_launch_requests(
+        saddles=[_raw_saddle(10), _raw_saddle(20)],
+        effective_cps=[],
+        hidden_vertex_ids=set(),
+        eff_ring_radius={},
+        center=(0.0, 0.0, 0.0),
+        delta_theta_mesh_rad=math.radians(1.606),
+        k_pitch=2.0,
+    )
+    assert [r.saddle_id for r in reqs] == ["SAD_10", "SAD_20"]
+    assert all(r.vertex_id >= 0 for r in reqs)
+
+
+def test_hidden_raw_saddles_are_excluded() -> None:
+    """A raw saddle collapsed into an effective one is not seeded."""
+    reqs = sv.build_launch_requests(
+        saddles=[_raw_saddle(10), _raw_saddle(20), _raw_saddle(30)],
+        effective_cps=[],
+        hidden_vertex_ids={20},
+        eff_ring_radius={},
+        center=(0.0, 0.0, 0.0),
+        delta_theta_mesh_rad=math.radians(1.606),
+        k_pitch=2.0,
+    )
+    assert [r.saddle_id for r in reqs] == ["SAD_10", "SAD_30"]
+
+
+def test_effective_saddles_are_included() -> None:
+    """The case the link scan could not serve: an E-SAD with no vertex_id."""
+    reqs = sv.build_launch_requests(
+        saddles=[],
+        effective_cps=[_eff_sad("E-SAD_CAT_1", 3)],
+        hidden_vertex_ids=set(),
+        eff_ring_radius={"E-SAD_CAT_1": math.radians(6.0)},
+        center=(0.0, 0.0, 0.0),
+        delta_theta_mesh_rad=math.radians(1.606),
+        k_pitch=2.0,
+    )
+    assert len(reqs) == 1
+    req = reqs[0]
+    assert req.saddle_id == "E-SAD_CAT_1"
+    assert req.vertex_id == -1
+    assert req.expected_k == 3
+    # The constellation's own ring radius, not the lone-CP rule.
+    assert req.a0_rad == pytest.approx(math.radians(6.0))
+
+
+def test_extrema_are_not_seeded() -> None:
+    """E-MAX and E-MIN carry no separatrix; only E-SAD rows become requests."""
+    eff = [_eff_sad("E-SAD_CAT_1", 3), _eff_sad("E-MAX_MC7", 0)]
+    eff[1]["type"] = "E-MAX"
+    reqs = sv.build_launch_requests(
+        saddles=[],
+        effective_cps=eff,
+        hidden_vertex_ids=set(),
+        eff_ring_radius={},
+        center=(0.0, 0.0, 0.0),
+        delta_theta_mesh_rad=math.radians(1.606),
+        k_pitch=2.0,
+    )
+    assert [r.saddle_id for r in reqs] == ["E-SAD_CAT_1"]
+
+
+def test_expected_k_from_multiplicity_for_raw_saddles() -> None:
+    """A raw saddle of multiplicity mu has fold order k = mu + 1."""
+    reqs = sv.build_launch_requests(
+        saddles=[_raw_saddle(1, multiplicity=1), _raw_saddle(2, multiplicity=2)],
+        effective_cps=[],
+        hidden_vertex_ids=set(),
+        eff_ring_radius={},
+        center=(0.0, 0.0, 0.0),
+        delta_theta_mesh_rad=math.radians(1.606),
+        k_pitch=2.0,
+    )
+    assert [r.expected_k for r in reqs] == [2, 3]
+    assert [r.multiplicity for r in reqs] == [1, 2]
+
+
+def test_lone_saddle_radius_follows_the_excision_rule() -> None:
+    """A lone raw saddle's a0 is max(margin, k_pitch * dtheta / 2)."""
+    dtheta = math.radians(1.606)
+    reqs = sv.build_launch_requests(
+        saddles=[_raw_saddle(1)],
+        effective_cps=[],
+        hidden_vertex_ids=set(),
+        eff_ring_radius={},
+        center=(0.0, 0.0, 0.0),
+        delta_theta_mesh_rad=dtheta,
+        k_pitch=2.0,
+    )
+    # k_pitch * dtheta / 2 = 1.606 deg beats the 1.5 deg margin.
+    assert reqs[0].a0_rad == pytest.approx(dtheta)
+
+    # A small pitch makes the fixed margin win instead.
+    small = sv.build_launch_requests(
+        saddles=[_raw_saddle(1)],
+        effective_cps=[],
+        hidden_vertex_ids=set(),
+        eff_ring_radius={},
+        center=(0.0, 0.0, 0.0),
+        delta_theta_mesh_rad=math.radians(0.3),
+        k_pitch=2.0,
+    )
+    assert small[0].a0_rad == pytest.approx(math.radians(1.5))
+
+
+def test_k_pitch_slider_moves_the_initial_radius() -> None:
+    """The clustering pitch is a live control and must reach the ring rule."""
+    dtheta = math.radians(1.606)
+    reqs = sv.build_launch_requests(
+        saddles=[_raw_saddle(1)],
+        effective_cps=[],
+        hidden_vertex_ids=set(),
+        eff_ring_radius={},
+        center=(0.0, 0.0, 0.0),
+        delta_theta_mesh_rad=dtheta,
+        k_pitch=6.0,
+    )
+    assert reqs[0].a0_rad == pytest.approx(3.0 * dtheta)
+
+
+def test_effective_centre_is_mapped_to_the_centred_frame() -> None:
+    """UI positions are world frame; the ring search works in the centred frame."""
+    centre = (10.0, -3.0, 0.5)
+    reqs = sv.build_launch_requests(
+        saddles=[],
+        effective_cps=[_eff_sad("E-SAD_CAT_1", 3, position=(10.0, -2.0, 0.5))],
+        hidden_vertex_ids=set(),
+        eff_ring_radius={},
+        center=centre,
+        delta_theta_mesh_rad=math.radians(1.606),
+        k_pitch=2.0,
+    )
+    assert reqs[0].centre == pytest.approx((0.0, 1.0, 0.0))
+
+
+def test_effective_falls_back_to_the_lone_rule_without_a_radius() -> None:
+    """An effective saddle with no recorded ring radius still gets a sane a0."""
+    dtheta = math.radians(1.606)
+    reqs = sv.build_launch_requests(
+        saddles=[],
+        effective_cps=[_eff_sad("E-SAD_CAT_9", 2)],
+        hidden_vertex_ids=set(),
+        eff_ring_radius={},
+        center=(0.0, 0.0, 0.0),
+        delta_theta_mesh_rad=dtheta,
+        k_pitch=2.0,
+    )
+    assert reqs[0].a0_rad == pytest.approx(dtheta)
+
+
+def test_raw_saddles_precede_effective_ones() -> None:
+    """Ordering is stable, so the sidebar list and the seed list agree."""
+    reqs = sv.build_launch_requests(
+        saddles=[_raw_saddle(7)],
+        effective_cps=[_eff_sad("E-SAD_CAT_1", 3)],
+        hidden_vertex_ids=set(),
+        eff_ring_radius={},
+        center=(0.0, 0.0, 0.0),
+        delta_theta_mesh_rad=math.radians(1.606),
+        k_pitch=2.0,
+    )
+    assert [r.saddle_id for r in reqs] == ["SAD_7", "E-SAD_CAT_1"]
