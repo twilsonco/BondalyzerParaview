@@ -1331,7 +1331,11 @@ def run_sphere_viewer(
     cat_rings_actor.GetProperty().SetDiffuse(0.2)
     renderer.AddActor(cat_rings_actor)
 
-    # 5c. Boundary Ports: Valley Ports (Orange spheres) and Ridge Ports (Cyan spheres)
+    # 5c. Boundary Ports: Ridge Ports (orange-red) and Valley Ports (cyan).
+    # Colours match the launch-seed actors below: a ridge port is the ascent
+    # (unstable) manifold and a valley port is the descent (stable) manifold, and
+    # once seeds launch from the ports they are the same manifold, so they must
+    # not be drawn in opposite colours.
     vports_pts = vtkPoints()
     vports_poly = vtkPolyData()
     vports_poly.SetPoints(vports_pts)
@@ -1352,7 +1356,7 @@ def run_sphere_viewer(
 
     vport_actor = vtkActor()
     vport_actor.SetMapper(vport_mapper)
-    vport_actor.GetProperty().SetColor(1.0, 0.55, 0.0)  # Vivid Orange
+    vport_actor.GetProperty().SetColor(0.10, 0.75, 1.0)  # Cyan, as descent seeds
     vport_actor.GetProperty().SetAmbient(0.7)
     vport_actor.GetProperty().SetDiffuse(0.5)
     renderer.AddActor(vport_actor)
@@ -1377,7 +1381,7 @@ def run_sphere_viewer(
 
     rport_actor = vtkActor()
     rport_actor.SetMapper(rport_mapper)
-    rport_actor.GetProperty().SetColor(0.0, 0.85, 0.95)  # Cyan
+    rport_actor.GetProperty().SetColor(1.0, 0.35, 0.10)  # Orange-red, as ascent seeds
     rport_actor.GetProperty().SetAmbient(0.7)
     rport_actor.GetProperty().SetDiffuse(0.5)
     renderer.AddActor(rport_actor)
@@ -3468,7 +3472,7 @@ def run_sphere_viewer(
                             classes="mb-1",
                         )
                         v3.VSwitch(
-                            label="Show Boundary Ports (Orange=Valley, Cyan=Ridge)",
+                            label="Show Boundary Ports (Orange=Ridge, Cyan=Valley)",
                             v_model=("show_ports",),
                             density="compact",
                             color="info",
