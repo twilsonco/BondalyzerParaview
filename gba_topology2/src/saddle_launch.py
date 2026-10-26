@@ -115,6 +115,10 @@ class SaddleLaunchSeed:
     separatrix_directions: list[tuple[float, float, float]] = field(
         default_factory=list
     )
+    # Excision substrate only: the ring radius the branches were read from, and
+    # why the ring produced nothing. Both are zero/None for the cyclic-link path.
+    ring_radius_rad: float = 0.0
+    failure_reason: str | None = None
 
     @property
     def all_branches(self) -> list[LaunchBranch]:

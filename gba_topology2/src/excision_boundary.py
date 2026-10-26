@@ -406,6 +406,7 @@ def profile_boundary_loop(
     smoothing_window: int = 3,
     min_prominence_frac: float = 0.05,
     refine_azimuth: bool = False,
+    find_k_nearest: KNearestFinder | None = None,
 ) -> ExcisionBoundaryResult:
     """Profile a 1D excision boundary loop, extract ports, and compute implied Euler index.
 
@@ -417,6 +418,11 @@ def profile_boundary_loop(
         min_prominence_frac: Prominence threshold fraction (default 0.05).
         refine_azimuth: When True, ports are located between ring samples by
             parabolic interpolation (default False, which snaps them to samples).
+        find_k_nearest: Optional spatial index over ``mesh_pts`` (see
+            :func:`point_locator.make_kdtree_nearest_finder`). When given, the
+            profile is sampled with :func:`interpolate_scalar_at_points_local`,
+            which is numerically identical to the global scan and far cheaper when
+            many rings are profiled per frame.
 
     Returns:
         ExcisionBoundaryResult with profile values, valley ports, ridge ports,
@@ -434,11 +440,19 @@ def profile_boundary_loop(
         )
 
     pts_arr = np.array([rp.position for rp in ring_points], dtype=np.float64)
-    interp_vals = interpolate_scalar_at_points(
-        query_pts=pts_arr,
-        mesh_pts=mesh_pts,
-        f_vals=f_vals,
-    )
+    if find_k_nearest is not None:
+        interp_vals = interpolate_scalar_at_points_local(
+            query_pts=pts_arr,
+            mesh_pts=mesh_pts,
+            f_vals=f_vals,
+            find_k_nearest=find_k_nearest,
+        )
+    else:
+        interp_vals = interpolate_scalar_at_points(
+            query_pts=pts_arr,
+            mesh_pts=mesh_pts,
+            f_vals=f_vals,
+        )
     profile_list = [float(v) for v in interp_vals]
 
     valleys, ridges = extract_boundary_ports(

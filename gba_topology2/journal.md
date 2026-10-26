@@ -1299,3 +1299,36 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   - `uv run pytest`: **339 passed** (330 + 9).
   - `uv run ruff format` / `ruff check`: clean. `uv run mypy gba_topology2/ tests/`: no issues in 50 files.
 - **Open next**: `excision_launch.py` (unit 3), the pure ring-to-seed subroutine, which will call `profile_boundary_loop(..., refine_azimuth=True)`.
+
+---
+
+### [Entry 032] Excision-Based Launch Seeds: the Ring-to-Seed Subroutine (`excision_launch.py`)
+
+- **Objective**: Produce separatrix launch branches from a saddle's **excision boundary**, so seeds can be computed for effective critical points, which have no mesh vertex to scan.
+- **Why the cyclic link cannot do this**: `saddle_launch.extract_saddle_launch_seed` needs a `vertex_id` and walks the incident-triangle link graph. An effective CP's position is a mean of member directions, optionally nudged -- `effective_cp_to_ui` hardcodes `"vertex_id": -1`. No link, nothing to scan. Step 9 iterated `morse_res.saddles` and silently omitted every `E-SAD`, contradicting its own comment. The excision loop is defined for **any** point on the sphere, which is the property that makes it the substrate for the reduction stage.
+- **Changes**:
+  - `gba_topology2/src/excision_launch.py` (new, pure -- no VTK, no viewer): `extract_excision_launch_seed(ring_points, mesh_pts, f_vals, saddle_id, saddle_position, saddle_value, expected_k, ...)` -> the existing `SaddleLaunchSeed` / `LaunchBranch` dataclasses, so `_emit_branch`, the tube filters, the actors and the visibility gate in the viewer all survive unchanged.
+  - `SaddleLaunchSeed` gains two defaulted fields: `ring_radius_rad` (the accepted radius, for expansion bookkeeping) and `failure_reason` (why a ring produced nothing). Both zero/`None` for the link path, so existing construction sites are untouched.
+  - `profile_boundary_loop` gains `find_k_nearest`, threading the kd-tree locator from Entry 030 into the profiling entry point.
+- **Mapping from link scan to ring** (the semantics carry over cleanly):
+  - link sector with `f(u) > f(v)` -> **ridge port** (local max of `f|_loop`) -> `kind="ascent"`, unstable manifold.
+  - link sector with `f(u) < f(v)` -> **valley port** -> `kind="descent"`, stable manifold.
+  - link sign crossing -> profile crossing of `saddle_value`, by chord interpolation (`_crossing_azimuths`), giving the 2k separatrix directions.
+  - link sector bisector -> the **port itself**, refined to sub-sample azimuth (Entry 031).
+  - `fold_order = len(ascent)` -- unchanged formula, now measured on the loop.
+- **Launch direction**: the separatrix runs centre -> port -> outward, so the tangent is the geodesic direction at the port pointing away from the ring centre: `t = normalize((p.c) p - c)`. It is tangent to the sphere by construction (`t.p = 0`) and outward (`t.t1 = +cos(a) > 0`, and moving along it decreases `p.c`, i.e. increases angular distance from the centre).
+- **Bug caught by the tests**: the first draft used `c - (p.c) p`, which is the **inward** tangent -- the direction back toward the degenerate core. `test_tangent_points_away_from_the_ring_centre` failed on it immediately. The sign matters: launched inward, every Step 3 path would run into the singularity it is meant to escape.
+- **Failure taxonomy** (`FAILURE_REASONS`, the routing keys for the expansion loop):
+  | Reason | Meaning |
+  |---|---|
+  | `empty_ring` / `too_few_samples` | no loop to profile |
+  | `no_ports` | structureless profile (e.g. a constant field) |
+  | `unbalanced` | valleys != ridges -- still inside the degenerate core, expand |
+  | `below_min_k` | balanced 1 + 1 -- a ring around an **extremum**, not a saddle |
+- **Design decision -- this subroutine measures, it does not judge**: `index_agrees = (fold_order == expected_k)` is reported, never enforced. Rejecting a ring whose `k` disagrees is the expansion loop's job (unit 4). Keeping the two apart preserves the ring as an **independent** check on the reduction's `chi = 1 - k`; if the loop searched for `expected_k` and this function coerced to it, the audit would be circular.
+- **The extremum case, and why it is not fully handled here**: a ring around a maximum has a nearly flat profile, so IDW noise alone produces many balanced "ports" -- measured at `k = 17` on a synthetic maximum. The `k >= 2` gate catches the 1 + 1 case, and a noise-generated 17 is caught by `index_agrees = False`. Both are the expansion loop's `k == expected_k` acceptance test rejecting the ring, which is exactly the division of labour above. Pinned as `test_extremum_ring_is_not_accepted_as_a_saddle`.
+- **Validation**:
+  - `tests/test_excision_launch.py` (new, 23 tests): k = 2 / 3 / 4 branch counts and crossing counts (4 / 6 / 8), ideal 360/k azimuth spacing, ascent/descent interleaving (6 cyclic sign flips for k = 3), launch positions on the sphere **and** on the loop's small circle, tangents unit-length and perpendicular to the radial, tangents pointing outward, dense counter-clockwise `sector_index`, reported ring radius, index agreement and mismatch (measured `k` never coerced), all five failure reasons, `unbalanced` and `below_min_k` produced by real tilted fields, off-pole centres (frame recovered from the ring, not assumed), local-vs-global sampling parity to 1e-12, and identity-field passthrough.
+  - `uv run pytest`: **362 passed** (339 + 23).
+  - `uv run ruff format` / `ruff check`: clean. `uv run mypy gba_topology2/ tests/`: no issues in 52 files.
+- **Open next**: the ring-expansion loop (unit 4) that routes on `FAILURE_REASONS` and the `k == expected_k` audit, then the Step 9 rewire.
