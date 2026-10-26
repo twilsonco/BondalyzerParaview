@@ -81,6 +81,7 @@ from gba_topology2.src.catastrophe_classifier import (
     classify_catastrophes,
 )
 from gba_topology2.src.excision_boundary import (
+    KNearestFinder,
     profile_boundary_loop,
 )
 from gba_topology2.src.harmonic_nudge import (
@@ -108,6 +109,7 @@ from gba_topology2.src.params_schema import (
     load_params_from_dict,
     save_params_to_dict,
 )
+from gba_topology2.src.point_locator import make_kdtree_nearest_finder
 from gba_topology2.src.polarity_detector import (
     classify_cluster_polarity,
     effective_reduction_decision,
@@ -940,6 +942,8 @@ class ViewerSession:
         pts_np: (N, 3) centre-relative mesh vertices.
         triangles_np: (M, 3) triangle connectivity.
         render_poly: The mesh translated into the world frame, for drawing.
+        locator: Kd-tree over ``pts_np`` for local neighbour queries, built once
+            per mesh so hundreds of excision rings can share it.
         geom_info: Mesh geometry metrics (radius, pitch, counts).
         sphere_radius: Sphere radius R, in Angstrom.
         delta_theta_rad: Intrinsic angular mesh pitch, in radians.
@@ -954,6 +958,7 @@ class ViewerSession:
     pts_np: npt.NDArray[np.float64]
     triangles_np: npt.NDArray[np.int32]
     render_poly: vtkPolyData
+    locator: KNearestFinder
     geom_info: dict[str, Any]
     sphere_radius: float
     delta_theta_rad: float
@@ -1005,6 +1010,10 @@ def build_viewer_session(plt_path: str, atom_number: int) -> ViewerSession:
         pts_np, triangles_np, sphere_radius=float(atom_info["sphere_radius"])
     )
 
+    # Indexed over the centred mesh (sphere_poly carries pts_np), which is the
+    # frame every algorithm in the pipeline works in.
+    locator = make_kdtree_nearest_finder(sphere_poly)
+
     return ViewerSession(
         plt_path=abs_plt,
         atom_number=atom_number,
@@ -1015,6 +1024,7 @@ def build_viewer_session(plt_path: str, atom_number: int) -> ViewerSession:
         pts_np=pts_np,
         triangles_np=triangles_np,
         render_poly=render_poly,
+        locator=locator,
         geom_info=geom_info,
         sphere_radius=float(geom_info["sphere_radius"]),
         delta_theta_rad=float(geom_info["mesh_pitch_rad"]),
@@ -2677,6 +2687,9 @@ def run_sphere_viewer(
             session.pts_np = new_session.pts_np
             session.triangles_np = new_session.triangles_np
             session.render_poly = new_session.render_poly
+            # Indexed over the old mesh, so it must be swapped with the points
+            # it indexes: a stale tree returns neighbours of a discarded sphere.
+            session.locator = new_session.locator
             session.geom_info = new_session.geom_info
             session.sphere_radius = new_session.sphere_radius
             session.delta_theta_rad = new_session.delta_theta_rad

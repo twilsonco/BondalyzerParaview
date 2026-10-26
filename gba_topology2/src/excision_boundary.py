@@ -17,6 +17,7 @@ Subroutine contract per AGENTS.md:
 """
 
 import math
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -28,10 +29,18 @@ from gba_topology2.src.micro_cluster import BoundaryRingPoint
 __all__ = [
     "BoundaryPort",
     "ExcisionBoundaryResult",
+    "KNearestFinder",
     "extract_boundary_ports",
     "interpolate_scalar_at_points",
+    "interpolate_scalar_at_points_local",
     "profile_boundary_loop",
 ]
+
+# Returns the indices of the ``k`` mesh vertices nearest a query point. Injected
+# rather than constructed here so this module keeps its pure NumPy/stdlib
+# contract: production passes a vtkKdTreePointLocator wrapper from
+# ``point_locator``, tests pass a brute-force lambda.
+KNearestFinder = Callable[[Sequence[float], int], Sequence[int]]
 
 
 @dataclass(frozen=True)
@@ -107,14 +116,117 @@ def interpolate_scalar_at_points(
             interp_vals[i] = f[min_idx]
             continue
 
-        # Find k nearest neighbors
-        k_idx = np.argpartition(row_dists, k_neighbors)[:k_neighbors]
+        # Find k nearest neighbors. k is clamped to the mesh size so a request
+        # for more neighbours than exist uses every vertex, matching the
+        # spatially-indexed variant (argpartition rejects kth >= N outright).
+        kk = min(k_neighbors, len(row_dists))
+        k_idx = (
+            np.argpartition(row_dists, kk - 1)[:kk]
+            if kk < len(row_dists)
+            else np.arange(len(row_dists))
+        )
         d_k = row_dists[k_idx]
         weights = 1.0 / (d_k**power)
         sum_w = float(np.sum(weights))
         interp_vals[i] = float(np.sum(weights * f[k_idx]) / sum_w)
 
     return interp_vals
+
+
+def interpolate_scalar_at_points_local(
+    query_pts: npt.NDArray[np.floating[Any]],
+    mesh_pts: npt.NDArray[np.floating[Any]],
+    f_vals: npt.NDArray[np.floating[Any]],
+    find_k_nearest: KNearestFinder,
+    k_neighbors: int = 4,
+    power: float = 2.0,
+) -> npt.NDArray[np.float64]:
+    """Interpolate at query points by IDW over a spatially-indexed neighbour set.
+
+    Numerically identical to :func:`interpolate_scalar_at_points` -- the same
+    angular kernel, the same ``k_neighbors``/``power``, and the same exact-vertex
+    snap -- but it evaluates the kernel on the ``k`` candidates a spatial index
+    returns per query instead of on all N mesh vertices. That removes the
+    ``(M, N)`` ``arccos`` matrix, which costs ~1e6 transcendental evaluations per
+    excision ring at 20k mesh nodes.
+
+    Asking the index for exactly ``k`` nearest is sound here because the mesh
+    vertices and the ring samples both lie on the sphere of radius R: chord
+    distance is ``2 R sin(theta / 2)``, a strictly monotone function of the
+    angular distance the kernel uses, so the k nearest by chord are the k nearest
+    by angle. No search radius, widening, or global fallback is required.
+
+    Args:
+        query_pts: (M, 3) coordinates of sample points.
+        mesh_pts: (N, 3) coordinates of mesh vertices.
+        f_vals: (N,) scalar values at mesh vertices.
+        find_k_nearest: Callable returning the indices of the ``k`` mesh vertices
+            nearest to a query point, e.g. the wrapper from
+            :func:`point_locator.make_kdtree_nearest_finder`.
+        k_neighbors: Number of nearest neighbours to average (default 4).
+        power: IDW power parameter (default 2.0).
+
+    Returns:
+        (M,) interpolated scalar values.
+
+    Raises:
+        ValueError: If ``k_neighbors`` is not positive.
+    """
+    if k_neighbors <= 0:
+        raise ValueError(f"k_neighbors must be positive, got {k_neighbors}")
+
+    q = np.atleast_2d(np.asarray(query_pts, dtype=np.float64))
+    m = np.asarray(mesh_pts, dtype=np.float64)
+    f = np.asarray(f_vals, dtype=np.float64)
+
+    out = np.zeros(len(q), dtype=np.float64)
+    if len(q) == 0:
+        return out
+
+    # Unit directions: the kernel is angular, matching the global implementation.
+    m_norm = np.linalg.norm(m, axis=1, keepdims=True)
+    m_norm = np.where(m_norm < 1e-12, 1.0, m_norm)
+    m_unit = m / m_norm
+
+    q_norm = np.linalg.norm(q, axis=1, keepdims=True)
+    q_unit = np.where(q_norm < 1e-12, 1.0, q_norm)
+    q_unit = q / q_unit
+
+    # One index query per point (the locator is per-query), then the kernel is
+    # evaluated on the whole (M, k) candidate block at once.
+    cand = np.zeros((len(q), k_neighbors), dtype=np.int64)
+    widths = np.full(len(q), k_neighbors, dtype=np.int64)
+    for i in range(len(q)):
+        found = list(find_k_nearest(q[i].tolist(), k_neighbors))
+        widths[i] = min(len(found), k_neighbors)
+        for j, v in enumerate(found[:k_neighbors]):
+            cand[i, j] = int(v)
+
+    # Distances for the padded tail are forced to +inf so they drop out of the
+    # weighting, and a row with no candidates keeps its zero output.
+    cols = np.arange(k_neighbors)[None, :]
+    valid = cols < widths[:, None]
+
+    dots = np.einsum("ij,ikj->ik", q_unit, m_unit[cand])
+    d = np.where(valid, np.arccos(np.clip(dots, -1.0, 1.0)), np.inf)
+
+    # Exact-vertex snap, per the reference kernel's 1e-7 angular tolerance.
+    nearest_col = np.argmin(d, axis=1)
+    nearest_d = d[np.arange(len(q)), nearest_col]
+    snapped = valid.any(axis=1) & (nearest_d < 1e-7)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        w = 1.0 / d**power
+        w = np.where(valid, w, 0.0)
+        sum_w = w.sum(axis=1)
+        # A zero distance (exact vertex hit) makes this nan; those rows are
+        # replaced by the snap value below.
+        weighted = (w * f[cand]).sum(axis=1) / np.where(sum_w > 0, sum_w, 1.0)
+    weighted = np.where(np.isfinite(weighted), weighted, 0.0)
+
+    out[:] = np.where(snapped, f[cand[np.arange(len(q)), nearest_col]], weighted)
+    out[~valid.any(axis=1)] = 0.0
+    return out
 
 
 def extract_boundary_ports(
