@@ -1208,3 +1208,37 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   - `uv run mypy gba_topology2/src/sphere_viewer.py`: Success: no issues found.
   - Headless UI smoke test compiling and initializing viewer layout: passed cleanly.
   - Full test suite (`uv run pytest`): 253 passed.
+
+---
+
+
+### [Entry 029] High-Contrast Sidebar: Real Vuetify Theme Replaces the Force-Dark CSS (`sphere_viewer.py`)
+
+- **Objective**: Kill the dark-grey-on-light-grey text in the sphere viewer sidebar. Target: WCAG AA (4.5:1) for all body text and chip labels.
+- **Root cause -- two dead mechanisms stacked on top of each other**:
+  1. **`state.trame__theme = "dark"` was a no-op.** The string `trame__theme` appears **zero times** in `trame_server`, `trame_client`, `trame_vuetify`, the built `vuetify3.js`, or the trame `index-*.js` bundle. The app has always rendered in Vuetify's **default light theme** (`defaultTheme:"light"`).
+  2. **`html.Style` inside a Vue template never reaches the document.** Vue strips `<style>` from component templates. Verified two ways: a minimal Vue 3 repro (template containing `<style>` -> `document.querySelectorAll('style').length === 0`, rule not applied, no warning), and the live app (the drawer's rules were absent from `document.styleSheets`). So the Entry 028 block that set `#3e434c` cards and `#f0f2f5` text **has never executed**.
+  - The real grey-on-grey was therefore the **stock light theme**. `color="surface-variant"` in the light theme is a `#424242` panel with `#EEEEEE` text -- a dark-theme pair pasted into a light one -- and Vuetify paints emphasis text as `on-background` (black) at the stock **0.6** opacity. Black at 60% over `#424242` composites to `#1A1A1A`: **1.73:1**. Measured on the card:
+    - `text-medium-emphasis` (the ~50 field labels): **1.73:1**
+    - `text-high-emphasis` / card body text: 1.98:1
+    - `.text-teal` `#009688`: 2.74:1, `.text-grey` `#9e9e9e`: 3.75:1, `.text-cyan` `#00bcd4`: 4.38:1
+    - trame's own footer links `.text-grey-lighten-1` `#bdbdbd` on the white footer: 1.88:1
+- **The mechanism that does work**: `SinglePageWithDrawerLayout(server, vuetify_config=...)` -> `server.state.trame__vuetify3_config` -> `createVuetify(config)`. Vuetify generates `.text-{color}` / `.bg-{color}` rules from `themes.light.colors` into `#vuetify-theme-stylesheet`, injected into `<head>` **after** the static CSS and with `!important` at equal specificity, so **a palette entry beats the static Material rule**. Naming the accents in the palette fixes all 22 drawer tokens at once -- no per-widget edits.
+- **Changes** (`gba_topology2/src/sphere_viewer.py`):
+  - Added `VUE3_THEME_CONFIG`: black-on-white neutrals, semantic accents, the Material accents the cards name, explicit `-darken-N` entries, and `medium-emphasis-opacity` raised 0.6 -> 0.80.
+  - Wired it via `vuetify_config=`; deleted the dead `trame__theme` assignment and the dead `html.Style` block (48 lines).
+  - Card borders come from `defaults: {VCard: {border: True}}` -- set centrally, colored by the theme's `border-color` / `border-opacity` variables.
+  - Added `grey-lighten-1` to the palette: **trame's own layout footer** hardcodes `text-grey-lighten-1` on the "Powered by trame" links, which is 1.88:1 on a white footer.
+- **Findings**:
+  1. **`VChip` defaults to `variant="tonal"`, not filled.** The label is the accent and the underlay is `currentColor` at `--v-activated-opacity` (0.12), so an accent must clear AA **against its own 12% tint** as well as against the bare surface. Choosing chip colors for a solid fill with a white label is the wrong model -- that is what made the first palette draft pass on paper and fail in the browser.
+  2. **Vuetify derives `on-{color}` by perceptual (CIE) distance, not luminance** (`dt()` in the bundle). A mid-tone like `#C77800` is dark enough for black text by luminance but gets a **white** label, landing at 3.43:1.
+  3. **Sliders are self-tinting**: fill and thumb are the accent at full strength, the track is the same accent at 0.38 over the surface. Fill-vs-track is 3.56-4.16:1 (passes the 3:1 non-text floor); the track-vs-surface groove is ~1.9:1 **by Material design** and is not a WCAG target -- the value is carried by the thumb, not the groove.
+  4. **`surface-variant` is load-bearing beyond cards**: Vuetify also paints the slider track and ticks from `--v-theme-surface-variant`, so setting it near-white for cards has effects outside the card.
+- **Validation** (Chrome 155, real `vuetify3.js` + `vue.global.js` from the installed packages):
+  - Isolated harness mounting the real Vuetify with `VUE3_THEME_CONFIG`: 40/40 elements >= 4.5:1.
+  - **Live app** (`ethene4.plt`, atom C1) full-page sweep of every visible text node, with the WCAG large-text exemption applied: **175 elements checked, 0 failures**. Dialog sweep: 6 checked, 0 failures.
+  - Toolbar tonal buttons measured 7.28-8.13:1; table text 16.1:1; emphasis labels 11.84:1; card titles 15.8:1.
+  - `uv run pytest tests/test_sphere_viewer_theme.py`: 63 passed. Mutation-checked the guards: reverting a chip fill to `#C77800`, adding an unregistered `color="lime-darken-2"`, and restoring `state.trame__theme` each fail the suite.
+  - `uv run ruff check` / `ruff format --check`: clean. `uv run mypy gba_topology2 tests`: no issues in 48 files. Full suite: **316 passed**.
+- **Deliberately out of scope**: the 3D viewport keeps its dark renderer background and light-on-dark actor palette (white contours, yellow highlights, gold basin centers read 8-16:1 on dark and would vanish on white). A white sidebar beside a dark viewport is the normal ParaView arrangement.
+- **Open next**: (a) the same `color="surface-variant"` + light-theme trap exists in `BondalyzerParaView/trame_viewer.py` and `gba_topology/stage0_sphere_view.py`, which have no theme config at all; (b) any future `html.Style` in a trame layout is dead code -- if real CSS is ever needed it has to be a served stylesheet registered through `server.enable_module({"styles": [...], "serve": {...}})` (the client reads `trame__styles`), never a widget inside a template.

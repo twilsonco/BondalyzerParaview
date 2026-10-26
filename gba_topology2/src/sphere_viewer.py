@@ -136,6 +136,7 @@ __all__ = [
     "PARAM_FLOAT_KEYS",
     "PARAM_METRIC_KEYS",
     "PARAM_STRING_KEYS",
+    "VUE3_THEME_CONFIG",
     "ReductionUnit",
     "build_reduction_units",
     "catastrophe_claimed_cluster_ids",
@@ -147,6 +148,108 @@ __all__ = [
     "run_sphere_viewer",
     "save_params_to_dict",
 ]
+
+# Vuetify theme handed to createVuetify() through the layout's
+# ``vuetify_config=`` argument (which stores it as ``trame__vuetify3_config``).
+#
+# Why a theme and not CSS overrides: the drawer previously carried an
+# ``html.Style`` block forcing dark cards with ``!important``. Vue strips
+# ``<style>`` from component templates, so that block never reached the document
+# and the app rendered entirely in Vuetify's stock *light* theme -- where
+# ``surface-variant`` is a #424242 panel, emphasis text is black at 0.6 opacity
+# (1.73:1 on that panel), and the Material accents the cards name (``.text-teal``
+# #009688, ``.text-grey`` #9e9e9e) are light-theme mid-tones. That is the
+# grey-on-grey this palette removes.
+#
+# Vuetify generates ``.text-{color}`` / ``.bg-{color}`` rules from this palette
+# into its own stylesheet, injected after the static CSS and with ``!important``
+# at equal specificity -- so a palette entry wins over the static Material rule.
+# Naming the accents here therefore fixes all of them at once, with no per-widget
+# edits.
+#
+# Every value is the darkest shade of its own hue family that clears WCAG AA
+# (4.5:1) in *both* roles a color plays, measured against every surface it can
+# land on:
+#   - as text (``text-teal`` on a card), and
+#   - as a chip label, where VChip defaults to ``variant="tonal"``: the label is
+#     the accent and the background is that same accent at 12% over the card, so
+#     the accent must survive its own tint.
+# Hues are deliberately preserved, so teal still reads as teal.
+# ``medium-emphasis-opacity`` is raised from the stock 0.6 to 0.80, which lifts
+# the ~50 ``text-medium-emphasis`` labels from 1.7:1 to 11.8:1 in one place.
+VUE3_THEME_CONFIG: dict[str, Any] = {
+    "defaultTheme": "light",
+    # Cards are white-on-white in a light theme, so they need the edge the dark
+    # theme gave for free. Setting it as a Vuetify *default* applies it to every
+    # VCard from one place; the border color comes from the theme's
+    # ``border-color``/``border-opacity`` variables below.
+    "defaults": {"VCard": {"border": True}},
+    "theme": {
+        "themes": {
+            "light": {
+                "dark": False,
+                "colors": {
+                    # Neutrals. surface-variant is the card fill used by every
+                    # step card; the stock light value (#424242) is a dark panel
+                    # that only makes sense in a dark theme.
+                    "background": "#FFFFFF",
+                    "on-background": "#000000",
+                    "surface": "#FFFFFF",
+                    "on-surface": "#000000",
+                    "surface-bright": "#FFFFFF",
+                    "surface-light": "#E8EBF0",
+                    "surface-variant": "#F2F4F7",
+                    "on-surface-variant": "#1A1A1A",
+                    # Semantic accents.
+                    "primary": "#1256A3",
+                    "secondary": "#006256",
+                    "tertiary": "#6A1B9A",
+                    "error": "#A5231C",
+                    "info": "#0B4F9E",
+                    "success": "#1B5E20",
+                    "warning": "#7A4100",
+                    # Material accents named by the cards. Without these entries
+                    # the static Material CSS supplies light-theme mid-tones that
+                    # fail on white (.text-teal is #009688, .bg-grey is #9e9e9e).
+                    "teal": "#006256",
+                    "cyan": "#006064",
+                    "purple": "#6A1B9A",
+                    "amber": "#7A4100",
+                    "orange": "#7A4100",
+                    "deep-orange": "#9F2D0A",
+                    "grey": "#5A5A5A",
+                    # trame's layout footer hardcodes ``text-grey-lighten-1`` on
+                    # its "Powered by trame" links. The static Material value
+                    # (#bdbdbd) is legible on the dark footer it was written for
+                    # and 1.88:1 on a white one, so the palette overrides it.
+                    # Kept lighter than ``grey`` so the ramp order holds.
+                    "grey-lighten-1": "#6A6A6A",
+                    "blue": "#1256A3",
+                    "green": "#1B5E20",
+                    "red": "#A5231C",
+                    # Explicit -darken-N entries for the chips the source names,
+                    # so the result does not depend on Vuetify's generated
+                    # variation arithmetic. Ordered so each -darken-N stays darker
+                    # than its base.
+                    "amber-darken-2": "#6D5200",
+                    "amber-darken-3": "#874400",
+                    "orange-darken-2": "#913C00",
+                    "deep-orange-darken-1": "#993414",
+                    "cyan-darken-2": "#006069",
+                    "purple-darken-2": "#7B1FA2",
+                    "grey-darken-1": "#4A4A4A",
+                },
+                "variables": {
+                    "border-color": "#000000",
+                    "border-opacity": 0.24,
+                    "high-emphasis-opacity": 0.87,
+                    "medium-emphasis-opacity": 0.80,
+                    "disabled-opacity": 0.60,
+                },
+            }
+        }
+    },
+}
 
 
 def _parse_aux_radius(aux: dict[str, Any]) -> float | None:
@@ -1385,7 +1488,9 @@ def run_sphere_viewer(
             except (RuntimeError, Exception):
                 pass
 
-    # Initial state
+    # Initial state. The Vuetify theme is not set here: ``trame__theme`` is read
+    # by nothing in trame, so the palette is supplied to ``createVuetify()``
+    # through ``vuetify_config=`` on the layout below.
     default_field = field_items[0]["value"] if field_items else "Electron Density"
     state.plt_file = os.path.basename(session.plt_path)
     state.atom_info = session.atom_info
@@ -2757,51 +2862,16 @@ def run_sphere_viewer(
     update_field()
 
     # UI Layout
-    with SinglePageWithDrawerLayout(server) as layout:
+    with SinglePageWithDrawerLayout(server, vuetify_config=VUE3_THEME_CONFIG) as layout:
         layout.title.set_text(f"gba_topology2: Atom Sphere ({atom_info['atom_name']})")
         layout.drawer.width = 400
 
         with layout.drawer:
-            html.Style("""
-                /* Medium-slate grey pane backgrounds for high contrast against both black and white */
-                .v-navigation-drawer .v-card {
-                    background-color: #3e434c !important;
-                    color: #f0f2f5 !important;
-                }
-                .v-navigation-drawer .v-card-title,
-                .v-navigation-drawer .v-card-subtitle {
-                    color: #ffffff !important;
-                }
-                .v-navigation-drawer .v-card .text-medium-emphasis {
-                    color: #d8dce2 !important;
-                }
-                /* Sub-panels inside cards (e.g. counts grids, table containers) */
-                .v-navigation-drawer .surface,
-                .v-navigation-drawer .v-table {
-                    background-color: #30343b !important;
-                    color: #f0f2f5 !important;
-                }
-                .v-navigation-drawer .v-table th {
-                    background-color: #272a30 !important;
-                    color: #ffffff !important;
-                }
-                /* Slider track, thumb, and label typography contrast */
-                .v-navigation-drawer .v-slider-track__background {
-                    background-color: #202328 !important;
-                    opacity: 0.85 !important;
-                }
-                .v-navigation-drawer .v-slider-track__tick {
-                    background-color: #ffffff !important;
-                    opacity: 0.8 !important;
-                }
-                .v-navigation-drawer .v-slider-track__tick-label,
-                .v-navigation-drawer .v-slider__label,
-                .v-navigation-drawer .v-slider-thumb__label {
-                    color: #ffffff !important;
-                    font-weight: 500 !important;
-                    opacity: 0.95 !important;
-                }
-            """)
+            # No CSS here on purpose. ``html.Style`` renders a <style> tag inside
+            # the drawer's Vue template, and Vue strips <style> from templates,
+            # so nothing in a scoped block ever reaches the document. All colors
+            # and edges come from VUE3_THEME_CONFIG (see the layout construction
+            # above), which is the only mechanism that actually applies.
             with v3.VContainer(fluid=True, classes="pa-3"):
                 # Confirmation chip for the last "Save Parameters" write.
                 with html.Div(v_if="params_last_saved_path", classes="mb-2"):
