@@ -224,9 +224,15 @@ def test_export_rejects_typed_mismatch() -> None:
 
 
 def test_load_rejects_unknown_schema_version() -> None:
-    """A stale/broken schema version must be rejected, not guessed at."""
+    """A stale/broken schema version must be rejected, not guessed at.
+
+    Version 1 is the case that matters: it is a real file on disk, written
+    before the excision ring controls existed. It lacks every new key, so
+    without the version gate it would fail as a confusing "Missing parameter
+    'ring_samples'" KeyError instead of a clear version message.
+    """
     payload = _export()
-    for bad in (0, PARAMS_SCHEMA_VERSION + 1, "one", None):
+    for bad in (0, 1, PARAMS_SCHEMA_VERSION + 1, "one", None):
         payload["schema_version"] = bad
         with pytest.raises(ValueError):
             load_params_from_dict(payload)
@@ -293,3 +299,28 @@ def test_control_key_tables_partition_defaults() -> None:
     assert bools & strings == frozenset()
     assert floats & strings == frozenset()
     assert bools | floats | strings == set(DEFAULT_UI_STATE)
+
+
+def test_ring_controls_round_trip() -> None:
+    """The excision ring controls export, load, and keep their values."""
+    payload = _export(ring_samples=96, ring_expand_pitch=0.5, ring_max_pitch=20.0)
+    params = load_params_from_dict(payload)
+
+    assert params["ring_samples"] == 96
+    assert params["ring_expand_pitch"] == 0.5
+    assert params["ring_max_pitch"] == 20.0
+
+
+def test_ring_samples_loads_as_float_and_must_be_cast() -> None:
+    """ring_samples is int-valued in the UI but loads as float.
+
+    _coerce_float widens every numeric control, following the num_contours
+    precedent, so a consumer that needs an index count must cast with int().
+    Pinning this so the cast is not mistaken for a bug and removed.
+    """
+    payload = _export()
+    params = load_params_from_dict(payload)
+
+    assert isinstance(params["ring_samples"], float)
+    assert int(params["ring_samples"]) == 48
+    assert isinstance(params["num_contours"], float)

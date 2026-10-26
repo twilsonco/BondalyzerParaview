@@ -94,6 +94,13 @@ DEFAULT_UI_STATE: dict[str, Any] = {
     # Basin Locator Step 2: saddle separatrix launch seeds
     "show_launch_seeds": False,
     "launch_seed_pitch": 0.35,
+    # Excision ring geometry for the launch seeds. The ring is profiled at
+    # ring_samples azimuths, starting from the excision-radius rule and expanded
+    # by ring_expand_pitch * dtheta until its port signature is pure, up to
+    # ring_max_pitch * dtheta.
+    "ring_samples": 48,
+    "ring_expand_pitch": 1.0,
+    "ring_max_pitch": 12.0,
 }
 
 # Schema version of the JSON file written by the "Save Parameters" button.
@@ -104,7 +111,12 @@ DEFAULT_UI_STATE: dict[str, Any] = {
 # selection). The "camera" section was added later as an *optional* section,
 # so it did not warrant a version bump: files without it still load, and
 # files with it are recognised by the presence of the key.
-PARAMS_SCHEMA_VERSION = 1
+#
+# Version 2 adds the excision ring controls. Adding a control is breaking on its
+# own: load_params_from_dict requires every control key to be present, so a
+# version 1 file would fail with a confusing "Missing parameter
+# 'ring_samples'" KeyError. Bumping makes the rejection a clear version message.
+PARAMS_SCHEMA_VERSION = 2
 
 # Every editable control, in DEFAULT_UI_STATE's canonical order.
 PARAM_CONTROL_KEYS: tuple[str, ...] = tuple(DEFAULT_UI_STATE)

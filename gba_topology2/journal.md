@@ -1367,3 +1367,24 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   - `uv run pytest`: **380 passed** (362 + 18).
   - `uv run ruff format` / `ruff check`: clean. `uv run mypy gba_topology2/ tests/`: no issues in 54 files.
 - **Open next**: port colours (unit 5), the parameter schema (unit 6), then the Step 9 rewire that consumes all of this.
+
+---
+
+### [Entry 034] Excision Ring Controls in the Parameter Schema (`params_schema.py`)
+
+- **Objective**: Expose the excision ring geometry as live, savable controls, so the ring substrate can be tuned interactively and a tuned configuration can be captured in a snapshot.
+- **Changes**:
+  - `DEFAULT_UI_STATE` gains `ring_samples` (48), `ring_expand_pitch` (1.0), `ring_max_pitch` (12.0).
+  - All three added to the viewer's `@state.change` handler so they trigger a rebuild.
+  - `PARAMS_SCHEMA_VERSION` **1 -> 2**.
+  - The two committed sample snapshots migrated to v2.
+- **Why adding keys is breaking, not additive**: `load_params_from_dict` requires **every** control key to be present and raises `KeyError` naming the first missing one. A version 1 file lacks all three new keys, so without the bump it fails as a confusing `Missing parameter 'ring_samples' in section 'floats'` -- it looks like a corrupt file, not an old one. Bumping converts that into the clear `Unsupported params schema_version 1` ValueError. The version gate exists precisely to make stale files reject legibly.
+- **The type tables need no edits**: `PARAM_BOOL_KEYS` / `PARAM_FLOAT_KEYS` are derived by `isinstance` from `DEFAULT_UI_STATE`, and the import-time coverage check (`PARAM_*_KEYS` must partition `PARAM_CONTROL_KEYS`) validates the derivation. Adding a key to the defaults is sufficient; the check is the safety net.
+- **`ring_samples` is int-valued, exported as float**: it follows the `num_contours: 15` precedent -- `_coerce_float` widens every numeric control, so the round-trip yields `48.0` and consumers must cast with `int()`. Pinned by `test_ring_samples_loads_as_float_and_must_be_cast` so the cast is not later mistaken for a bug and removed.
+- **Fixture migration**: the two `ethene4_atom1_params *.json` files are real viewer output used by `test_a_saved_file_without_a_camera_still_resolves`, whose point is that an **absent camera section** still loads -- not that v1 loads. Migrated in place: `schema_version` 1 -> 2, the three new floats added at their defaults, camera left absent so the test keeps covering what it was written to cover. Written with `ensure_ascii=True` and `sort_keys=True` to match the exporter's own output; the first attempt used `ensure_ascii=False` and rewrote every non-ASCII escape as raw UTF-8, a 22-line diff where 5 was correct.
+- **`launch_seed_pitch` deliberately retained** in this unit. It is still read by Step 9 and by `diagnose_params.stage_launch`; removing it here would break the viewer for one commit. It is retired in the Step 9 rewire, which is the unit that stops needing it.
+- **Validation**:
+  - `tests/test_sphere_viewer_params_export.py`: `test_load_rejects_unknown_schema_version` extended to include version **1** in the rejected set -- the real-world stale case, previously untested. Two new tests: the ring controls round-trip with overridden values, and the int-as-float coercion contract.
+  - `uv run pytest`: **390 passed** (388 + 2). Params suites specifically: 76 passed, and the fixture test verified to PASS rather than skip.
+  - `uv run ruff format` / `ruff check`: clean. `uv run mypy gba_topology2/ tests/`: no issues in 55 files.
+- **Open next**: the Step 9 rewire (unit 7), which consumes `ring_samples` / `ring_expand_pitch` / `ring_max_pitch` and retires `launch_seed_pitch`.

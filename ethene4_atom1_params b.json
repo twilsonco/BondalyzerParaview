@@ -145,13 +145,16 @@
       "k_pitch": 2.0,
       "launch_seed_pitch": 0.35,
       "nudge_max_pitch": 1.5,
-      "num_contours": 15.0
+      "num_contours": 15.0,
+      "ring_expand_pitch": 1.0,
+      "ring_max_pitch": 12.0,
+      "ring_samples": 48.0
     },
     "strings": {
       "selected_field": "\u00cf\u0081 curvedness (condensed)"
     }
   },
-  "schema_version": 1,
+  "schema_version": 2,
   "selection": {
     "selected_basin_center_id": null,
     "selected_catastrophe_id": null,

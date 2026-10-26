@@ -2576,6 +2576,9 @@ def run_sphere_viewer(
         "nudge_max_pitch",
         "show_launch_seeds",
         "launch_seed_pitch",
+        "ring_samples",
+        "ring_expand_pitch",
+        "ring_max_pitch",
     )
     def on_param_change(**kwargs: Any) -> None:
         if suppress_param_change:
