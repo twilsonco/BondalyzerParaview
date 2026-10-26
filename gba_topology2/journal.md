@@ -1332,3 +1332,38 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   - `uv run pytest`: **362 passed** (339 + 23).
   - `uv run ruff format` / `ruff check`: clean. `uv run mypy gba_topology2/ tests/`: no issues in 52 files.
 - **Open next**: the ring-expansion loop (unit 4) that routes on `FAILURE_REASONS` and the `k == expected_k` audit, then the Step 9 rewire.
+
+---
+
+### [Entry 033] Self-Calibrating Excision Ring Search (`excision_launch_seeds.py`)
+
+- **Objective**: Choose the excision radius for each saddle, so a ring that starts inside the degenerate core expands until its port signature is pure.
+- **Why the radius must be searched**: the excision-radius rule puts a lone saddle's ring at `max(0 + 1.5deg, k_pitch*dtheta/2)` = **exactly 1 dtheta** on `Pd_20K`. Entry 031 measured that regime: IDW error is 7.3% of field span there, and the interpolated profile carries 3.6x the high-frequency content of the true one. A ring that tight has no clean alternating signature, and the tell is topological -- valley and ridge counts disagree. So **balance is used as a convergence test**.
+- **Changes**: `gba_topology2/src/excision_launch_seeds.py` (new, pure). `expand_excision_seed(SeedRequest, ...) -> ExpansionOutcome` walks radii from `a0` in `expand_pitch * dtheta` steps to `max_radius_pitch * dtheta`, accepting the first ring that is balanced, has `k == expected_k`, and has `k >= 2`. `summarize_outcomes` aggregates into the viewer's `launch_stats`.
+- **Separation of concerns**: this module owns the *policy* (which radius to accept); `excision_launch` owns the *measurement* (what the ring says). Kept apart so the ring stays an independent check on the reduction's `chi = 1 - k`.
+- **The finding that changed the design -- the overshoot early-exit needed a grace radius**: the plan specified stopping as soon as a balanced ring reported `k > expected_k`, on the assumption that port count grows monotonically with radius. **That assumption fails exactly where the ring is tightest, which is where the search starts.** Measured on a k = 3 monkey saddle:
+
+  | a0 | with immediate exit | with sustained exit |
+  |---|---|---|
+  | 0.4 deg | expanded, k=3 | expanded, k=3 |
+  | 0.8 deg | **k_overshoot, FAILED** | expanded, k=3 |
+  | 1.2 deg | **k_overshoot, FAILED** | expanded, k=3 |
+  | 2.0-20.0 deg | converged, k=3 | converged, k=3 |
+
+  Interpolation noise inflates the port count at a tight ring, so a single radius reads k = 4 for a k = 3 saddle and the search terminates on a guaranteed-successful path. Requiring the overshoot at **two consecutive radii** fixes it: all starting radii now recover k = 3. A *sustained* overshoot is still a real signal, so the cost saving survives. Mutation-checked: reverting to the immediate exit fails 6 of the 18 tests.
+- **Failure taxonomy** (`ExpansionOutcome.status`), and the diagnosis each one implies:
+  | Status | Meaning |
+  |---|---|
+  | `converged_at_a0` | the radius rule was right |
+  | `expanded` | the rule was too tight -- tune `min_boundary_margin_deg` |
+  | `unbalanced` | never balanced at any radius -- degenerate core |
+  | `k_mismatch` | balanced at the wrong k -- **the reduction's index is suspect** |
+  | `k_overshoot` | k passed the target and stayed past it -- ceiling too loose |
+  | `no_ring` | `expected_k < 2`, nothing to search for |
+  The `k_mismatch` / `unbalanced` split is what preserves the audit that accepting on `target_k` would otherwise destroy: `observed_k` is recorded at the **tightest balanced radius**, so "the field disagrees with the reported chi" is distinguishable from "the ring never resolved". Mutation-checked: collapsing the two into one bucket fails 3 tests.
+- **Ceiling semantics**: the ceiling bounds **expansion**, not `a0`. A constellation's ring is `span/2 + dtheta` and can legitimately exceed 12 dtheta, so `a0` is always profiled once. Pinning this explicitly, because "the radius never exceeds the ceiling" is false and a future reader will assume it.
+- **Validation**:
+  - `tests/test_excision_launch_seeds.py` (new, 18 tests): convergence at a0 for k = 2/3/4, expansion from a too-tight ring, all seven starting radii recovering the same k, `k_mismatch` and `unbalanced` diagnoses, ceiling bounds, `expand_pitch` controlling step count, `expected_k < 2` short-circuit, the caller's ring reused unmodified at a0, local-vs-global sampling parity to 1e-12, `num_samples` honoured, and the aggregate stats (converged/expanded/failed counts, failing entity ids with radius, empty-input well-formedness).
+  - `uv run pytest`: **380 passed** (362 + 18).
+  - `uv run ruff format` / `ruff check`: clean. `uv run mypy gba_topology2/ tests/`: no issues in 54 files.
+- **Open next**: port colours (unit 5), the parameter schema (unit 6), then the Step 9 rewire that consumes all of this.
