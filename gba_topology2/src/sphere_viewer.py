@@ -2303,6 +2303,9 @@ def run_sphere_viewer(
             k_pitch=float(state.k_pitch),
         )
 
+        # Step, ceiling and sample count are module constants on
+        # expand_excision_seed, not controls: the topology found must not depend
+        # on operator tuning.
         outcomes = [
             expand_excision_seed(
                 request=req,
@@ -2311,9 +2314,6 @@ def run_sphere_viewer(
                 sphere_radius=session.sphere_radius,
                 delta_theta_mesh_rad=dtheta,
                 find_k_nearest=session.locator,
-                expand_pitch=float(state.ring_expand_pitch),
-                max_radius_pitch=float(state.ring_max_pitch),
-                num_samples=int(state.ring_samples),
             )
             for req in launch_requests
         ]
@@ -2666,9 +2666,6 @@ def run_sphere_viewer(
         "perfect_port_angles",
         "nudge_max_pitch",
         "show_launch_seeds",
-        "ring_samples",
-        "ring_expand_pitch",
-        "ring_max_pitch",
     )
     def on_param_change(**kwargs: Any) -> None:
         if suppress_param_change:
@@ -4036,75 +4033,6 @@ def run_sphere_viewer(
                         )
 
                         with html.Div(v_if="show_launch_seeds"):
-                            with html.Div(
-                                classes="d-flex justify-space-between align-center mt-1"
-                            ):
-                                html.Div(
-                                    "Ring Samples",
-                                    classes="text-caption font-weight-bold text-medium-emphasis",
-                                )
-                                html.Div(
-                                    "{{ Number(ring_samples).toFixed(0) }} pts ({{ (360 / ring_samples).toFixed(1) }}° pitch)",
-                                    classes="text-caption font-weight-bold text-orange",
-                                )
-
-                            v3.VSlider(
-                                min=24,
-                                max=96,
-                                step=8,
-                                v_model=("ring_samples",),
-                                density="compact",
-                                thumb_label=False,
-                                color="orange",
-                                classes="mt-1",
-                            )
-
-                            with html.Div(
-                                classes="d-flex justify-space-between align-center mt-1"
-                            ):
-                                html.Div(
-                                    "Expand Step",
-                                    classes="text-caption font-weight-bold text-medium-emphasis",
-                                )
-                                html.Div(
-                                    "{{ Number(ring_expand_pitch).toFixed(2) }}x δθ",
-                                    classes="text-caption font-weight-bold text-orange",
-                                )
-
-                            v3.VSlider(
-                                min=0.25,
-                                max=3.0,
-                                step=0.25,
-                                v_model=("ring_expand_pitch",),
-                                density="compact",
-                                thumb_label=False,
-                                color="orange",
-                                classes="mt-1",
-                            )
-
-                            with html.Div(
-                                classes="d-flex justify-space-between align-center mt-1"
-                            ):
-                                html.Div(
-                                    "Radius Ceiling",
-                                    classes="text-caption font-weight-bold text-medium-emphasis",
-                                )
-                                html.Div(
-                                    "{{ Number(ring_max_pitch).toFixed(1) }}x δθ ({{ (ring_max_pitch * geom_info.mesh_pitch_deg).toFixed(1) }}°)",
-                                    classes="text-caption font-weight-bold text-orange",
-                                )
-
-                            v3.VSlider(
-                                min=2.0,
-                                max=24.0,
-                                step=1.0,
-                                v_model=("ring_max_pitch",),
-                                density="compact",
-                                thumb_label=False,
-                                color="orange",
-                                classes="mt-1",
-                            )
-
                             with html.Div(classes="mt-2 pa-2 rounded surface"):
                                 with v3.VRow(
                                     dense=True, classes="text-caption text-center"

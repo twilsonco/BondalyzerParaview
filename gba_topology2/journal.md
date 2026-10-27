@@ -1444,3 +1444,51 @@ All work follows the coding standards outlined in `/AGENTS.md`:
 - **The tuning finding, and it contradicts the obvious intuition**: raising Ring Samples from 48 to 88 made the search **worse** -- fewer saddles seeded (10 -> 9), more expansions (0 -> 6), more mismatches (2 -> 3). Finer azimuthal sampling resolves IDW interpolation noise as additional spurious extrema, inflating the measured k. This is the direct consequence of the Entry 031 measurement: at a tight ring the interpolated profile carries **3.6x the high-frequency content of the true field**, so sampling it more densely samples more noise.
   - The practical rule: **the residual error is an interpolation limit, not a sampling limit.** Raising `ring_samples` cannot buy accuracy; expanding the radius can, because the IDW error falls from 7.3% of field span at 1.6 deg to 0.5% at 20 deg. 48 is a reasonable default and the slider is for exploring the ceiling, not for beating it.
 - **Validation**: `uv run pytest`: **403 passed**. `ruff format` / `ruff check` / `mypy gba_topology2/ tests/`: clean.
+
+---
+
+### [Entry 037] Removing the Expansion Early-Exit; Ring Geometry Fixed (3 sliders -> 0)
+
+- **Objective**: Fix the reported defect (E-SAD_MC22 seeds only at expand step >= 1.25, not at 0.75) and reduce the number of adjustable parameters needed to find the correct topology, per the project goal.
+- **The bug, and it was mine**: the `k_overshoot` -> `k_mismatch` early-exit added in Entry 033 terminates the search when two **consecutive ladder rungs** agree on an inflated `k`. "Consecutive" counts rungs, and rung spacing **is** the expand step (`step = expand_pitch * dtheta`). IDW noise is spatially correlated, so two closely spaced radii agree almost by construction. A fine, thorough scan was punished with premature termination; a coarse one survived. **The expand step was choosing which saddles seeded**, which is exactly what the goal forbids.
+- **Reproduced on the real data before fixing** (Pd_20K, Electron Density (condensed), old code, step 0.75/48 samples):
+
+  | saddle | 0.25 | 0.5 | 0.75 | 1.0 | 1.25 | 2.0 |
+  |---|---|---|---|---|---|---|
+  | E-SAD_MC22 | FAIL | FAIL | **FAIL** | FAIL | OK | OK |
+  | E-SAD_MC4 | OK | OK | OK | OK | OK | OK |
+
+  Exactly the reported symptom, including MC4 being unaffected. **Coding problem, not logic** -- the user's logic and the predecessor's were both right.
+- **The fix**: delete the early-exit. The sweep now profiles every radius on the ladder and returns only on `k == expected_k`, which is precisely the predecessor's `compute_adaptive_excision_regions` (gba_topology/topology_engine.py:1477): sweep `r_sweep`, `break` on success, no early exit. That is why the predecessor never showed non-convergence. `best_k_at_balance` and the final `k_mismatch`/`unbalanced` diagnosis are kept -- that is the chi = 1 - k audit.
+- **Verified after fixing**: MC22 and MC4 both converge at **every** step in {0.25, 0.5, 0.75, 1.0, 1.25, 2.0}, all at k = 2.
+- **Parameters reduced 3 -> 0.** All three sliders removed; the values are module constants in `excision_launch_seeds`, matching the predecessor, which hardcoded them (3.0/24.0/0.5 deg, 64 samples):
+
+  | Constant | Value | Predecessor |
+  |---|---|---|
+  | `RING_SAMPLES` | 16 | 64 |
+  | `EXPAND_PITCH` | 0.5 dtheta | 0.5 deg |
+  | `MAX_RADIUS_PITCH` | 16 dtheta (25.7 deg on Pd_20K) | 24 deg |
+
+  They remain function arguments (defaults = the constants) so tests can vary them; the viewer and `diagnose_params` pass none, so the harness and the viewer cannot drift.
+- **`RING_SAMPLES = 16` validated on real data**, and the user's recollection that 48 was overkill is confirmed. Yield is 100% at every count; the difference is *where* it converges:
+
+  | dataset | samples | seeded | conv@a0 | expanded | mean radii | time |
+  |---|---|---|---|---|---|---|
+  | Pd_20K / Electron Density | 16 | 12/12 | 6 | 6 | 1.50 | 0.03s |
+  | Pd_20K / Electron Density | 48 | 12/12 | **0** | **12** | **4.33** | 0.13s |
+  | Pd_20K / V | 16 | 20/20 | 20 | 0 | 1.00 | 0.03s |
+  | Pd_20K / V | 48 | 20/20 | 15 | 5 | 1.25 | 0.06s |
+  | ethene4 / Electron Density | 16 | 5/5 | 5 | 0 | 1.00 | 0.01s |
+
+  48 samples converges at a0 far less often and costs 4x, consistent with Entry 031: finer azimuthal sampling resolves interpolation noise as spurious extrema. 12 also works, so 16 has margin.
+- **Two jobs, two constants**: `ring_samples` had been driving BOTH the measurement profile and the DRAWING of the visible purple/black boundary rings. Profiling now uses 16; drawing keeps `num_boundary_points=48` in `compute_micro_clusters`, so displayed rings are not 16-gons.
+- **Ceiling semantics, simplified**: with no early exit, a tight ceiling just means fewer rungs -- it can no longer trap a ring. The earlier "the floor is load-bearing" caution from the plan is retired as the user directed.
+- **Pd_20K Electron Density, 172 raw saddles, fixed geometry**: 127 converged at a0, 39 expanded, 6 `k_mismatch`, 0 unbalanced. Counters sum to 172 exactly. **0.67s total, 3.9ms per saddle.** The 6 failures each ran the full 31-rung ladder to the 25.7 deg ceiling reading k = 3 against an expected k = 2 -- genuine index disagreements, surfaced with ids in the sidebar.
+- **Validation**:
+  - `tests/test_excision_launch_seeds.py`: 4 new tests. The regression is pinned by a **scripted stub** that replaces the measurement with `k(radius)`, isolating the search policy from the numerics -- the first attempt used a synthetic noisy field and failed for the right reason (it modelled the opposite shape, k inflated at large radius), which is itself evidence the stub is the honest test. `test_search_is_invariant_to_the_expand_step` reproduces the MC22 ladder (inflated k below 4 deg, true k above) and asserts convergence at all six step sizes; `test_finer_step_is_at_least_as_thorough` asserts success is monotone in step size; `test_no_early_exit_scans_the_whole_ladder` asserts a permanently inflated k is diagnosed only after the full sweep.
+  - **Mutation-checked**: restoring the early-exit fails 2 of the new tests, and reproduces MC22's exact failure pattern on real data.
+  - `tests/test_sphere_viewer_params_export.py`: the two ring-control tests replaced by `test_ring_geometry_is_not_a_control` (the keys cannot return to `DEFAULT_UI_STATE`) and `test_snapshot_with_retired_ring_keys_still_loads` (old files carrying the keys load fine -- removing a key needs no version bump, only adding one does).
+  - `tests/test_diagnose_params.py`: fixture drops the three keys.
+  - Live check (Pd_20K, port 8921): card renders with the three sliders gone, stats grid, mismatch line and unresolved-ring list intact.
+  - `uv run pytest`: **407 passed**. `ruff format` / `ruff check` / `mypy gba_topology2/ tests/`: clean.
+- **Open next**: the 6 `k_mismatch` saddles on electron density are worth inspecting -- they are simple saddles whose loop consistently shows 3 ridge ports, which is a finding about the Morse detector, not the rings.

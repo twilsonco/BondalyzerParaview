@@ -714,6 +714,9 @@ def stage_launch(ctx: RunContext) -> dict[str, Any]:
         delta_theta_mesh_rad=ctx.delta_theta_rad,
         k_pitch=float(_p(ctx, "k_pitch")),
     )
+    # Step, ceiling and sample count come from the excision_launch_seeds module
+    # constants (the defaults), not from params: the harness must exercise the
+    # same fixed geometry the viewer does, so the two cannot drift.
     outcomes = [
         expand_excision_seed(
             request=req,
@@ -722,9 +725,6 @@ def stage_launch(ctx: RunContext) -> dict[str, Any]:
             sphere_radius=ctx.sphere_radius,
             delta_theta_mesh_rad=ctx.delta_theta_rad,
             find_k_nearest=ctx.locator,
-            expand_pitch=float(_p(ctx, "ring_expand_pitch")),
-            max_radius_pitch=float(_p(ctx, "ring_max_pitch")),
-            num_samples=int(_p(ctx, "ring_samples")),
         )
         for req in requests
     ]

@@ -301,26 +301,40 @@ def test_control_key_tables_partition_defaults() -> None:
     assert bools | floats | strings == set(DEFAULT_UI_STATE)
 
 
-def test_ring_controls_round_trip() -> None:
-    """The excision ring controls export, load, and keep their values."""
-    payload = _export(ring_samples=96, ring_expand_pitch=0.5, ring_max_pitch=20.0)
-    params = load_params_from_dict(payload)
+def test_ring_geometry_is_not_a_control() -> None:
+    """The excision ring step, ceiling and sample count are not adjustable.
 
-    assert params["ring_samples"] == 96
-    assert params["ring_expand_pitch"] == 0.5
-    assert params["ring_max_pitch"] == 20.0
+    They are module constants in ``excision_launch_seeds``. Exposing them as
+    controls let the operator change WHICH saddles produce seeds, not just how
+    finely the search runs -- the topology found must not depend on tuning. An
+    earlier revision's early-exit had exactly this defect: it counted consecutive
+    ladder rungs, and rung spacing is the expand step.
+
+    Pinned here so the three keys cannot be re-added to DEFAULT_UI_STATE as a
+    side effect of re-exposing a slider.
+    """
+    for key in ("ring_samples", "ring_expand_pitch", "ring_max_pitch"):
+        assert key not in DEFAULT_UI_STATE, f"{key} must be a constant, not a control"
+        assert key not in sv.PARAM_BOOL_KEYS
+        assert key not in sv.PARAM_FLOAT_KEYS
 
 
-def test_ring_samples_loads_as_float_and_must_be_cast() -> None:
-    """ring_samples is int-valued in the UI but loads as float.
+def test_snapshot_with_retired_ring_keys_still_loads() -> None:
+    """Files saved while the ring controls existed load unchanged.
 
-    _coerce_float widens every numeric control, following the num_contours
-    precedent, so a consumer that needs an index count must cast with int().
-    Pinning this so the cast is not mistaken for a bug and removed.
+    The loader iterates the SCHEMA's keys and reads them from the payload, so an
+    extra key in an older file is ignored. Retiring a control therefore needs no
+    schema version bump and no fixture migration -- only ADDING a key breaks old
+    files, because a missing required key raises.
     """
     payload = _export()
+    payload["params"]["floats"]["ring_samples"] = 96.0
+    payload["params"]["floats"]["ring_expand_pitch"] = 0.5
+    payload["params"]["floats"]["ring_max_pitch"] = 20.0
+
     params = load_params_from_dict(payload)
 
-    assert isinstance(params["ring_samples"], float)
-    assert int(params["ring_samples"]) == 48
-    assert isinstance(params["num_contours"], float)
+    assert "ring_samples" not in params
+    assert "ring_expand_pitch" not in params
+    assert "ring_max_pitch" not in params
+    assert params["k_pitch"] == DEFAULT_UI_STATE["k_pitch"]

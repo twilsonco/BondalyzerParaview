@@ -8,6 +8,7 @@ disagreement.
 """
 
 import math
+from collections.abc import Callable
 
 import numpy as np
 import numpy.typing as npt
@@ -19,7 +20,8 @@ from gba_topology2.src.excision_launch_seeds import (
     expand_excision_seed,
     summarize_outcomes,
 )
-from gba_topology2.src.micro_cluster import generate_boundary_ring
+from gba_topology2.src.micro_cluster import BoundaryRingPoint, generate_boundary_ring
+from gba_topology2.src.saddle_launch import LaunchBranch, SaddleLaunchSeed
 
 
 def _sphere(num_points: int = 4000, radius: float = 1.0) -> np.ndarray:
@@ -367,3 +369,177 @@ def test_k_mismatch_carries_the_stable_measurement_for_inspection() -> None:
     # The seed retained for diagnostics is the balanced one that was rejected.
     assert out.seed.fold_order == 3
     assert out.seed.index_agrees is False
+
+
+# ---------------------------------------------------------------------------
+# Step-invariance: the expand step is a resolution knob, not a topology knob.
+#
+# The regression this pins: an early-exit counted consecutive LADDER RUNGS
+# agreeing on an inflated k. Rung spacing is expand_pitch * dtheta, and IDW noise
+# is spatially correlated, so closely spaced radii agree almost by construction.
+# On Pd_20K, E-SAD_MC22 lost its seeds at expand step 0.75 and recovered them at
+# 1.25 -- the operator's step slider was choosing which saddles seeded.
+# ---------------------------------------------------------------------------
+
+
+def _scripted_seed(
+    monkeypatch: pytest.MonkeyPatch,
+    k_of_radius: Callable[[float], float],
+) -> None:
+    """Replace the measurement with a stub that returns k as a function of radius.
+
+    Isolates the search POLICY from the numerics, so the ladder's control flow
+    can be tested deterministically.
+    """
+    from gba_topology2.src import excision_launch_seeds as els
+
+    def fake(
+        *,
+        ring_points: list[BoundaryRingPoint],
+        saddle_id: str,
+        saddle_position: tuple[float, float, float],
+        saddle_value: float,
+        expected_k: int,
+        vertex_id: int,
+        multiplicity: int,
+        **kw: object,
+    ) -> SaddleLaunchSeed:
+        ang = math.acos(max(-1.0, min(1.0, ring_points[0].position[2])))
+        k = int(k_of_radius(ang))
+        if k < 2:
+            return SaddleLaunchSeed(
+                saddle_id=saddle_id,
+                saddle_position=saddle_position,
+                saddle_value=saddle_value,
+                vertex_id=vertex_id,
+                multiplicity=multiplicity,
+                fold_order=0,
+                index_agrees=False,
+                failure_reason="no_ports",
+            )
+        px, py, pz = ring_points[0].position
+        br = [
+            LaunchBranch("ascent", i, (1.0, 0.0, 0.0), (px, py, pz), 0.5, 0.1)
+            for i in range(k)
+        ]
+        return SaddleLaunchSeed(
+            saddle_id=saddle_id,
+            saddle_position=saddle_position,
+            saddle_value=saddle_value,
+            vertex_id=vertex_id,
+            multiplicity=multiplicity,
+            fold_order=k,
+            index_agrees=(k == expected_k),
+            ascent_branches=list(br),
+            descent_branches=list(br),
+            ring_radius_rad=ang,
+        )
+
+    monkeypatch.setattr(els, "extract_excision_launch_seed", fake)
+
+
+def test_search_is_invariant_to_the_expand_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The MC22 regression: a fine step must not lose a seed a coarse step found.
+
+    Scripted k(r): inflated to 4 for r < 4 deg, then the true k = 2. At a fine
+    step the ladder visits 3.0 and 3.5, two consecutive radii agreeing on the
+    inflated 4 -- the removed early-exit terminated there and reported
+    k_mismatch, so no seed. A coarse step jumps past the agreement and survives
+    to 4 deg, where it converges. The step slider was choosing which saddles
+    seeded.
+    """
+    _scripted_seed(monkeypatch, lambda r: 2.0 if r >= math.radians(4.0) else 4.0)
+    dth = math.radians(1.606)
+
+    outcomes = {}
+    for step in (0.25, 0.5, 0.75, 1.0, 1.25, 2.0):
+        req = SeedRequest(
+            saddle_id="S",
+            centre=(0.0, 0.0, 1.0),
+            saddle_value=0.0,
+            expected_k=2,
+            a0_rad=math.radians(1.0),
+        )
+        outcomes[step] = expand_excision_seed(
+            req, PTS, MONKEY, 1.0, dth, expand_pitch=step, max_radius_pitch=16.0
+        )
+
+    for step, out in outcomes.items():
+        assert out.converged, f"step {step} lost a seed: status={out.status}"
+        assert out.seed.fold_order == 2, f"step {step}: k={out.seed.fold_order}"
+        # Accepted radius is at or above the 4 deg where k becomes true.
+        assert math.degrees(out.a_final_rad) >= 4.0 - 1e-9
+
+
+def test_finer_step_is_at_least_as_thorough(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Success is monotone in step size: finer never seeds fewer.
+
+    The search profiles every radius in the ladder and succeeds if any hits
+    expected_k, so a finer step visits a denser set of radii and can only find
+    more, never less.
+    """
+    # k = 2 only in a narrow band at 6-7 deg.
+    _scripted_seed(
+        monkeypatch,
+        lambda r: 2.0 if math.radians(6.0) <= r < math.radians(7.0) else 5.0,
+    )
+    dth = math.radians(1.606)
+    found = {}
+    for step in (0.5, 1.0, 2.0, 4.0):
+        req = SeedRequest(
+            saddle_id="S",
+            centre=(0.0, 0.0, 1.0),
+            saddle_value=0.0,
+            expected_k=2,
+            a0_rad=math.radians(1.0),
+        )
+        found[step] = expand_excision_seed(
+            req, PTS, MONKEY, 1.0, dth, expand_pitch=step, max_radius_pitch=16.0
+        ).converged
+
+    # Monotone: once a step size succeeds, every finer step must also succeed.
+    steps = sorted(found)
+    for i, s1 in enumerate(steps):
+        for s2 in steps[i + 1 :]:
+            if found[s2]:
+                assert found[s1], f"step {s2} succeeded but finer {s1} failed"
+
+
+def test_no_early_exit_scans_the_whole_ladder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A permanently inflated k is diagnosed only after the full sweep.
+
+    Without the early exit the search costs at most (ceiling - a0)/step profiles
+    per failing saddle, and reports the tightest balanced measurement.
+    """
+    _scripted_seed(monkeypatch, lambda r: 5.0)
+    dth = math.radians(1.606)
+    req = SeedRequest(
+        saddle_id="S",
+        centre=(0.0, 0.0, 1.0),
+        saddle_value=0.0,
+        expected_k=2,
+        a0_rad=math.radians(1.0),
+    )
+    out = expand_excision_seed(
+        req, PTS, MONKEY, 1.0, dth, expand_pitch=1.0, max_radius_pitch=16.0
+    )
+    assert out.status == "k_mismatch"
+    assert out.observed_k == 5
+    # Full ladder 1..16 deg at 1.606 deg steps, not a 2-rung early bail.
+    assert out.radii_tried >= 8
+
+
+def test_module_constants_are_the_single_source_of_truth() -> None:
+    """The ring geometry is fixed in code, not read from the viewer state."""
+    from gba_topology2.src.excision_launch_seeds import (
+        EXPAND_PITCH,
+        MAX_RADIUS_PITCH,
+        RING_SAMPLES,
+    )
+
+    assert RING_SAMPLES >= 12, "need >= 3 samples per lobe at k = 4"
+    assert EXPAND_PITCH > 0
+    assert MAX_RADIUS_PITCH > EXPAND_PITCH
+    assert MAX_RADIUS_PITCH >= 8.0

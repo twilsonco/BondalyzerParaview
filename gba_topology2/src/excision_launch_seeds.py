@@ -18,6 +18,22 @@ So balance is used as a convergence test. The ring is expanded until the port
 signature is pure -- balanced, at the fold order the reduction stage reports, and
 at least 2 (a balanced 1 + 1 is an extremum, not a saddle).
 
+Why the sweep has no early exit
+-------------------------------
+The search walks radii from the excision-radius rule to the ceiling and stops
+only on success. An earlier revision also stopped when two consecutive radii
+agreed on an inflated ``k``, to save profiling time. That is unsound: "two
+consecutive radii" counts ladder rungs, and rung spacing is the expand step, so
+the criterion is measured in a unit the operator controls. IDW noise is
+spatially correlated, so two closely spaced rings agree almost by construction --
+a fine, thorough scan terminated prematurely while a coarse one survived, and
+which saddles produced seeds depended on the step size. The expand step is a
+resolution knob and must not be able to change the topology that is found.
+
+Measured on Pd_20K: E-SAD_MC22 lost its seeds at expand step 0.75 and recovered
+them at 1.25, purely from this effect. Removing the early exit makes the outcome
+invariant in the step, which is the property the regression test pins.
+
 What accepting on the target k costs
 ------------------------------------
 Expanding until ``k == expected_k`` makes the ring a *constructor* of the index
@@ -48,6 +64,9 @@ from gba_topology2.src.micro_cluster import (
 from gba_topology2.src.saddle_launch import SaddleLaunchSeed
 
 __all__ = [
+    "EXPAND_PITCH",
+    "MAX_RADIUS_PITCH",
+    "RING_SAMPLES",
     "ExpansionOutcome",
     "SeedRequest",
     "expand_excision_seed",
@@ -56,6 +75,27 @@ __all__ = [
 
 # A ring around an extremum balances at 1 + 1; it is never a saddle signature.
 _MIN_SADDLE_K = 2
+
+# Ring search geometry, fixed so the topology found does not depend on operator
+# tuning. The predecessor (gba_topology.topology_engine
+# .compute_adaptive_excision_regions) hardcoded the same three quantities; the
+# values here are in mesh-pitch units so they scale with the grid.
+#
+#   RING_SAMPLES      azimuthal samples used to PROFILE a ring for launch seeds.
+#                     16 resolves 4 samples per lobe at k = 4, the floor for the
+#                     smoothing and prominence filters. More samples is not
+#                     better: finer azimuthal sampling resolves IDW interpolation
+#                     noise as spurious extrema and inflates the measured k.
+#   EXPAND_PITCH      radius increment per retry.
+#   MAX_RADIUS_PITCH  ceiling for the radius, ~25.7 deg on Pd_20K, matching the
+#                     predecessor's 24 deg sweep.
+#
+# The boundary rings the viewer DRAWS keep their own 48-sample count
+# (num_boundary_points in compute_micro_clusters): that is a rendering
+# resolution, and dropping it to 16 would draw visible 16-gons.
+RING_SAMPLES = 16
+EXPAND_PITCH = 0.5
+MAX_RADIUS_PITCH = 16.0
 
 
 @dataclass(frozen=True)
@@ -140,30 +180,21 @@ def expand_excision_seed(
     sphere_radius: float,
     delta_theta_mesh_rad: float,
     find_k_nearest: KNearestFinder | None = None,
-    expand_pitch: float = 1.0,
-    max_radius_pitch: float = 12.0,
-    num_samples: int = 48,
+    expand_pitch: float = EXPAND_PITCH,
+    max_radius_pitch: float = MAX_RADIUS_PITCH,
+    num_samples: int = RING_SAMPLES,
     smoothing_window: int = 3,
     min_prominence_frac: float = 0.05,
 ) -> ExpansionOutcome:
     """Expand a saddle's excision ring until its port signature is pure.
 
     Accepts at the first radius that is balanced, has fold order equal to
-    ``expected_k``, and has ``k >= 2``. Stops early once two **consecutive** radii
-    agree on the same ``k > expected_k``: the measurement has stabilised, so the
-    target is unreachable and continuing would profile up to a dozen more rings
-    per saddle for a guaranteed failure.
-
-    Two consecutive readings are required because the port count is not monotone
-    in radius where the profile is noise-dominated. At a tight ring the IDW error
-    is a large fraction of the field span, and that noise inflates the count: a
-    k = 3 monkey saddle read at 0.8 deg reports k = 4, then k = 3 correctly at 2
-    deg. A single spike is the ring being too tight, which is what expanding
-    fixes. A count that repeats at a larger radius is not noise, and it is a
-    genuine disagreement with the index the reduction reported -- so the search
-    returns ``k_mismatch``, not a separate overshoot class. Measured on Pd_20K,
-    every sustained overshoot was stable across the whole 3-19 deg range, which is
-    what makes "overshoot" and "index disagreement" the same event.
+    ``expected_k``, and has ``k >= 2``. The sweep has no early exit: every radius
+    down the ladder is profiled until one succeeds, so the expand step is a pure
+    resolution knob that cannot change which saddles seed (see the module
+    docstring for why an earlier version's stability exit was unsound). The
+    step, ceiling and sample count default to module constants -- the viewer
+    passes none of them -- and remain arguments so tests can vary them.
 
     Args:
         request: The saddle and its initial ring.
@@ -174,9 +205,7 @@ def expand_excision_seed(
         find_k_nearest: Spatial index over ``mesh_pts``; strongly recommended,
             since the search profiles up to a dozen rings per saddle.
         expand_pitch: Radius increment, in mesh-pitch units.
-        max_radius_pitch: Ceiling for the radius, in mesh-pitch units. Matches
-            ``classify_catastrophes.max_search_pitch`` so both stages agree on
-            how far is too far.
+        max_radius_pitch: Ceiling for the radius, in mesh-pitch units.
         num_samples: Circumferential samples per ring.
         smoothing_window: Moving-average window for the loop profile.
         min_prominence_frac: Port prominence threshold fraction.
@@ -216,7 +245,6 @@ def expand_excision_seed(
         radii = [a0]
 
     best_k_at_balance = 0
-    previous_k = 0
     last_seed: SaddleLaunchSeed | None = None
     last_radius = a0
 
@@ -259,26 +287,11 @@ def expand_excision_seed(
                 seed, status, tried, radius, measured, request.expected_k
             )
 
-        if measured > request.expected_k:
-            # A single overshoot at a tight ring is usually interpolation noise
-            # inflating the port count, not a real k, so it is not yet evidence.
-            # Two consecutive radii agreeing on the same inflated count is: the
-            # measurement has stabilised, and it disagrees with the index.
-            if measured == previous_k:
-                return ExpansionOutcome(
-                    seed,
-                    "k_mismatch",
-                    tried,
-                    radius,
-                    measured,
-                    request.expected_k,
-                )
-            previous_k = measured
-            continue
-        # k < expected_k: keep expanding, more lobes may resolve at a larger
-        # radius. A drop resets the stability pair, so only two consecutive
-        # equal readings terminate the search.
-        previous_k = 0
+        # Any other reading keeps expanding. There is deliberately no early
+        # exit: the sweep IS the search, and terminating on a "stable" inflated
+        # count made the outcome depend on the step size, because IDW noise is
+        # spatially correlated and two closely spaced radii agree almost by
+        # construction. See the module docstring.
 
     observed = best_k_at_balance
     status = "k_mismatch" if observed > 0 else "unbalanced"

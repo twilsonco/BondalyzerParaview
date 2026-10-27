@@ -91,14 +91,12 @@ DEFAULT_UI_STATE: dict[str, Any] = {
     "nudge_cp_positions": False,
     "perfect_port_angles": False,
     "nudge_max_pitch": 1.5,
-    # Basin Locator Step 2: saddle separatrix launch seeds. The seeds launch from
-    # each saddle's excision boundary, profiled at ring_samples azimuths and
-    # expanded by ring_expand_pitch * dtheta until the port signature is pure, up
-    # to ring_max_pitch * dtheta.
+    # Basin Locator Step 2: saddle separatrix launch seeds. Seeds launch from
+    # each saddle's excision boundary, expanded until the port signature is pure.
+    # The ring step, ceiling and sample count are deliberately NOT controls: they
+    # are module constants in excision_launch_seeds, because the topology found
+    # must not depend on operator tuning.
     "show_launch_seeds": False,
-    "ring_samples": 48,
-    "ring_expand_pitch": 1.0,
-    "ring_max_pitch": 12.0,
 }
 
 # Schema version of the JSON file written by the "Save Parameters" button.
