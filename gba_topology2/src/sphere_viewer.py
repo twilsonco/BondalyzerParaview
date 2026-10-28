@@ -187,7 +187,15 @@ VUE3_THEME_CONFIG: dict[str, Any] = {
     # theme gave for free. Setting it as a Vuetify *default* applies it to every
     # VCard from one place; the border color comes from the theme's
     # ``border-color``/``border-opacity`` variables below.
-    "defaults": {"VCard": {"border": True}},
+    "defaults": {
+        "VCard": {"border": True},
+        # Without baseColor the off-state track inherits surface-variant
+        # (#F2F4F7), which is the same as the card fill — making the channel
+        # invisible when the switch is off.  grey-darken-1 (#4A4A4A) gives a
+        # visible groove on every card background without clashing with any of
+        # the on-state accent colours.
+        "VSwitch": {"baseColor": "grey-darken-1"},
+    },
     "theme": {
         "themes": {
             "light": {

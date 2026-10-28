@@ -1492,3 +1492,9 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   - Live check (Pd_20K, port 8921): card renders with the three sliders gone, stats grid, mismatch line and unresolved-ring list intact.
   - `uv run pytest`: **407 passed**. `ruff format` / `ruff check` / `mypy gba_topology2/ tests/`: clean.
 - **Open next**: the 6 `k_mismatch` saddles on electron density are worth inspecting -- they are simple saddles whose loop consistently shows 3 ridge ports, which is a finding about the Morse detector, not the rings.
+
+### [Entry 038] VSwitch Off-State Track Visibility (`sphere_viewer.py`)
+- **Objective**: Make toggle channels visible in their disabled (off) state.
+- **Root cause**: In Vuetify 3 the `VSwitch` inactive track defaults to the theme's `surface-variant` colour when `baseColor` is not set. The card fill also uses `surface-variant` (`#F2F4F7`), so the channel was invisible — the groove only appeared once the switch was turned on (as a lighter tint of the `color` prop).
+- **Fix**: Added `"VSwitch": {"baseColor": "grey-darken-1"}` to `VUE3_THEME_CONFIG["defaults"]` in `sphere_viewer.py`. `grey-darken-1` is already in the palette as `#4A4A4A`, providing a clearly visible grey channel against `#F2F4F7` for all 13 `VSwitch` widgets with a single-line change. The on-state colour (`color` prop on each widget) is unaffected.
+- **Validation**: `ruff format` / `ruff check` / `mypy gba_topology2/ tests/`: clean.
