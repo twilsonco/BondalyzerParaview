@@ -191,7 +191,7 @@ VUE3_THEME_CONFIG: dict[str, Any] = {
         "VCard": {"border": True},
         # Without baseColor the off-state track inherits surface-variant
         # (#F2F4F7), which is the same as the card fill — making the channel
-        # invisible when the switch is off.  grey-darken-1 (#4A4A4A) gives a
+        # invisible when the switch is off. grey-darken-1 (#4A4A4A) gives a
         # visible groove on every card background without clashing with any of
         # the on-state accent colours.
         "VSwitch": {"baseColor": "grey-darken-1"},
@@ -3104,7 +3104,7 @@ def run_sphere_viewer(
                             v_model=("selected_field",),
                             density="compact",
                             variant="outlined",
-                            classes="mb-2",
+                            classes="mb-2 bg-surface",
                         )
 
                         v3.VSwitch(
