@@ -1498,3 +1498,28 @@ All work follows the coding standards outlined in `/AGENTS.md`:
 - **Root cause**: In Vuetify 3 the `VSwitch` inactive track defaults to the theme's `surface-variant` colour when `baseColor` is not set. The card fill also uses `surface-variant` (`#F2F4F7`), so the channel was invisible — the groove only appeared once the switch was turned on (as a lighter tint of the `color` prop).
 - **Fix**: Added `"VSwitch": {"baseColor": "grey-darken-1"}` to `VUE3_THEME_CONFIG["defaults"]` in `sphere_viewer.py`. `grey-darken-1` is already in the palette as `#4A4A4A`, providing a clearly visible grey channel against `#F2F4F7` for all 13 `VSwitch` widgets with a single-line change. The on-state colour (`color` prop on each widget) is unaffected.
 - **Validation**: `ruff format` / `ruff check` / `mypy gba_topology2/ tests/`: clean.
+
+### [Entry 039] Basin Boundary Validator for Automated Parameter Selection (`basin_validator.py`)
+- **Objective**: Implement the foundation for automated selection of critical point simplification parameters (Cluster Pitch Multiplier, Bridge Radius) by validating that simplified CP configurations satisfy topological correctness constraints.
+- **Problem Motivation**: Two independent parameters control CP simplification in the UI, yielding a 2D parameter space with multiple potential solutions. Only configurations where **max basins have boundaries with alternating min/saddle CPs** and **min basins have boundaries with alternating max/saddle CPs** are valid. Manual exploration is tedious; automated validation enables parameter space search.
+- **Implementation**:
+  - `gba_topology2/src/basin_validator.py`: Core subroutine providing three public functions:
+    1. `is_valid_max_basin_boundary(boundary_types)`: Check max basin boundary alternation (minimum-saddle-minimum-saddle...).
+    2. `is_valid_min_basin_boundary(boundary_types)`: Check min basin boundary alternation (maximum-saddle-maximum-saddle...).
+    3. `validate_basin_boundaries(all_cps, visible_max_ids, visible_min_ids)`: Validate all basins in a simplified CP configuration and return `SimplificationValidity` result with summary.
+  - `BasinBoundaryResult` dataclass: Stores validation outcome for a single basin (basin_id, center polarity, boundary CP list, alternation status, error details).
+  - `SimplificationValidity` dataclass: Aggregate result for entire configuration (is_valid, num_max/min_basins_valid, failing_basin list, error summary).
+  - Helper `_find_alternation_errors()`: Identifies which positions violate alternation constraint.
+- **Simplification Assumption**: Current implementation treats all saddles and opposite-polarity extrema as the boundary of each basin (global boundary). This is a simplification that assumes availability of gradient flow graph data will refine it later. For now, it suffices to validate alternation pattern.
+- **Unit Tests** (`tests/test_basin_validator.py`):
+  - `TestMaxBasinBoundaryValidation`: 7 tests covering valid/invalid patterns, empty boundaries, non-alternating sequences.
+  - `TestMinBasinBoundaryValidation`: 5 tests for min-basin dual logic.
+  - `TestBasinBoundaryValidationIntegration`: 4 tests including multi-CP configurations, visibility filtering, empty lists.
+  - `TestBasinValidationErrorReporting`: 3 tests for error tracking and reporting.
+  - **Total**: 19 tests, all passing.
+- **Validation**:
+  - `uv run pytest tests/test_basin_validator.py`: 19 passed.
+  - `ruff format` / `ruff check`: clean.
+  - `mypy gba_topology2 tests`: clean (no variable shadowing, proper type annotations).
+  - Pre-commit hook suite: all pass.
+- **Next Steps**: Implement parameter space search (grid/adaptive) and ranking algorithm to identify optimal simplification parameters automatically (Tasks BV-2, BV-3, BV-4).
