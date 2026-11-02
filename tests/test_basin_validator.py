@@ -1,310 +1,451 @@
 """Unit tests for basin_validator.py.
 
-Tests the basin boundary extraction and validation logic against various
-synthetic CP configurations using CriticalPoint instances.
+Tests the basin boundary validation logic using both:
+1. Type-sequence helpers (is_valid_max/min_basin_boundary)
+2. Adjacency-based cycle validation (validate_max/min_basin_boundary,
+   validate_all_basin_boundaries, build_morse_smale_adjacency)
 """
+
+from __future__ import annotations
+
+from gba_topology2.src.basin_center import BasinCenter
+from gba_topology2.src.basin_validator import (
+    SaddleAdjacency,
+    build_morse_smale_adjacency,
+    is_valid_max_basin_boundary,
+    is_valid_min_basin_boundary,
+    validate_all_basin_boundaries,
+    validate_max_basin_boundary,
+    validate_min_basin_boundary,
+)
+from gba_topology2.src.saddle_launch import LaunchBranch, SaddleLaunchSeed
+
+# ---------------------------------------------------------------------------
+# Type-sequence helpers
+# ---------------------------------------------------------------------------
+
+
+class TestMaxBasinBoundaryTypeSequence:
+    """Tests for is_valid_max_basin_boundary."""
+
+    def test_valid_min_sad_min_sad(self) -> None:
+        ok, pat = is_valid_max_basin_boundary(
+            ["minimum", "saddle", "minimum", "saddle"]
+        )
+        assert ok
+        assert "m" in pat and "s" in pat
+
+    def test_valid_sad_min_sad_min(self) -> None:
+        ok, _ = is_valid_max_basin_boundary(["saddle", "minimum", "saddle", "minimum"])
+        assert ok
+
+    def test_valid_two_element(self) -> None:
+        ok, _ = is_valid_max_basin_boundary(["saddle", "minimum"])
+        assert ok
+
+    def test_invalid_consecutive_minima(self) -> None:
+        ok, msg = is_valid_max_basin_boundary(["minimum", "minimum", "saddle"])
+        assert not ok
+        assert "non-alternating" in msg
+
+    def test_invalid_consecutive_saddles(self) -> None:
+        ok, _ = is_valid_max_basin_boundary(["saddle", "saddle", "minimum"])
+        assert not ok
+
+    def test_invalid_maximum_in_boundary(self) -> None:
+        ok, msg = is_valid_max_basin_boundary(["minimum", "maximum", "saddle"])
+        assert not ok
+        assert "invalid type" in msg
+
+    def test_empty_boundary(self) -> None:
+        ok, msg = is_valid_max_basin_boundary([])
+        assert not ok
+        assert "empty" in msg
+
+
+class TestMinBasinBoundaryTypeSequence:
+    """Tests for is_valid_min_basin_boundary."""
+
+    def test_valid_max_sad_max_sad(self) -> None:
+        ok, _ = is_valid_min_basin_boundary(["maximum", "saddle", "maximum", "saddle"])
+        assert ok
+
+    def test_valid_sad_max_sad_max(self) -> None:
+        ok, _ = is_valid_min_basin_boundary(["saddle", "maximum", "saddle", "maximum"])
+        assert ok
+
+    def test_valid_two_element(self) -> None:
+        ok, _ = is_valid_min_basin_boundary(["saddle", "maximum"])
+        assert ok
+
+    def test_invalid_consecutive_maxima(self) -> None:
+        ok, msg = is_valid_min_basin_boundary(["maximum", "maximum", "saddle"])
+        assert not ok
+        assert "non-alternating" in msg
+
+    def test_invalid_minimum_in_boundary(self) -> None:
+        ok, msg = is_valid_min_basin_boundary(["maximum", "minimum", "saddle"])
+        assert not ok
+        assert "invalid type" in msg
+
+
+# ---------------------------------------------------------------------------
+# Adjacency-based validation helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_adj(spec: dict[str, tuple[list[str], list[str]]]) -> SaddleAdjacency:
+    """Build a SaddleAdjacency from a compact spec: {sad_id: ([maxes], [mins])}."""
+    return {sid: {"max": maxes, "min": mins} for sid, (maxes, mins) in spec.items()}
+
+
+class TestValidateMaxBasinBoundary:
+    """Tests for validate_max_basin_boundary."""
+
+    def test_valid_triangle_topology(self) -> None:
+        # 3 saddles, 3 minima around one maximum: classic degree-3 max
+        adj = _make_adj(
+            {
+                "S1": (["MAX_A", "MAX_B"], ["MIN_1", "MIN_2"]),
+                "S2": (["MAX_A", "MAX_C"], ["MIN_2", "MIN_3"]),
+                "S3": (["MAX_A", "MAX_D"], ["MIN_3", "MIN_1"]),
+            }
+        )
+        result = validate_max_basin_boundary("MAX_A", adj)
+        assert result.is_valid, result.error
+        assert result.n_saddles == 3
+        assert result.n_extrema == 3
+
+    def test_valid_rectangle_topology(self) -> None:
+        # 4 saddles, 4 minima around one maximum
+        adj = _make_adj(
+            {
+                "S1": (["MAX_A", "X"], ["MIN_1", "MIN_2"]),
+                "S2": (["MAX_A", "X"], ["MIN_2", "MIN_3"]),
+                "S3": (["MAX_A", "X"], ["MIN_3", "MIN_4"]),
+                "S4": (["MAX_A", "X"], ["MIN_4", "MIN_1"]),
+            }
+        )
+        result = validate_max_basin_boundary("MAX_A", adj)
+        assert result.is_valid, result.error
+        assert result.n_saddles == 4
+
+    def test_invalid_no_adjacent_saddles(self) -> None:
+        adj: SaddleAdjacency = {}
+        result = validate_max_basin_boundary("MAX_A", adj)
+        assert not result.is_valid
+        assert "no adjacent saddles" in result.error
+
+    def test_invalid_extremum_degree_not_2(self) -> None:
+        # MIN_1 appears in 3 saddles → degree 3, not 2
+        adj = _make_adj(
+            {
+                "S1": (["MAX_A"], ["MIN_1", "MIN_2"]),
+                "S2": (["MAX_A"], ["MIN_2", "MIN_1"]),
+                "S3": (["MAX_A"], ["MIN_1", "MIN_3"]),
+            }
+        )
+        result = validate_max_basin_boundary("MAX_A", adj)
+        assert not result.is_valid
+        assert "degree" in result.error
+
+    def test_invalid_disconnected_boundary(self) -> None:
+        # Two disconnected sub-cycles: S1-MIN_1-S2-MIN_2 and S3-MIN_3-S4-MIN_4
+        adj = _make_adj(
+            {
+                "S1": (["MAX_A"], ["MIN_1", "MIN_2"]),
+                "S2": (["MAX_A"], ["MIN_2", "MIN_1"]),
+                "S3": (["MAX_A"], ["MIN_3", "MIN_4"]),
+                "S4": (["MAX_A"], ["MIN_4", "MIN_3"]),
+            }
+        )
+        result = validate_max_basin_boundary("MAX_A", adj)
+        assert not result.is_valid
+        assert "cycle" in result.error
+
+
+class TestValidateMinBasinBoundary:
+    """Tests for validate_min_basin_boundary."""
+
+    def test_valid_two_saddle_topology(self) -> None:
+        # Classic degree-2 min: 2 saddles, 2 maxima
+        adj = _make_adj(
+            {
+                "S1": (["MAX_1", "MAX_2"], ["MIN_A", "X"]),
+                "S2": (["MAX_2", "MAX_1"], ["MIN_A", "X"]),
+            }
+        )
+        result = validate_min_basin_boundary("MIN_A", adj)
+        assert result.is_valid, result.error
+        assert result.n_saddles == 2
+        assert result.n_extrema == 2
+
+    def test_valid_three_saddle_topology(self) -> None:
+        adj = _make_adj(
+            {
+                "S1": (["MAX_1", "MAX_2"], ["MIN_A", "X"]),
+                "S2": (["MAX_2", "MAX_3"], ["MIN_A", "X"]),
+                "S3": (["MAX_3", "MAX_1"], ["MIN_A", "X"]),
+            }
+        )
+        result = validate_min_basin_boundary("MIN_A", adj)
+        assert result.is_valid, result.error
+        assert result.n_saddles == 3
+
+    def test_invalid_no_saddles(self) -> None:
+        adj: SaddleAdjacency = {}
+        result = validate_min_basin_boundary("MIN_A", adj)
+        assert not result.is_valid
+
+    def test_invalid_disconnected(self) -> None:
+        adj = _make_adj(
+            {
+                "S1": (["MAX_1", "MAX_2"], ["MIN_A"]),
+                "S2": (["MAX_2", "MAX_1"], ["MIN_A"]),
+                "S3": (["MAX_3", "MAX_4"], ["MIN_A"]),
+                "S4": (["MAX_4", "MAX_3"], ["MIN_A"]),
+            }
+        )
+        result = validate_min_basin_boundary("MIN_A", adj)
+        assert not result.is_valid
+
+
+# ---------------------------------------------------------------------------
+# build_morse_smale_adjacency
+# ---------------------------------------------------------------------------
+
+
+def _make_seed(
+    saddle_id: str,
+    saddle_pos: tuple[float, float, float],
+    asc_tangents: list[tuple[float, float, float]],
+    desc_tangents: list[tuple[float, float, float]],
+) -> SaddleLaunchSeed:
+    """Build a minimal SaddleLaunchSeed for testing."""
+    ascent = [
+        LaunchBranch(
+            kind="ascent",
+            sector_index=i,
+            tangent_direction=t,
+            launch_position=t,  # same as tangent for tests
+            sector_width_rad=1.0,
+            sector_centroid_value=0.0,
+        )
+        for i, t in enumerate(asc_tangents)
+    ]
+    descent = [
+        LaunchBranch(
+            kind="descent",
+            sector_index=i,
+            tangent_direction=t,
+            launch_position=t,
+            sector_width_rad=1.0,
+            sector_centroid_value=0.0,
+        )
+        for i, t in enumerate(desc_tangents)
+    ]
+    return SaddleLaunchSeed(
+        saddle_id=saddle_id,
+        saddle_position=saddle_pos,
+        saddle_value=0.0,
+        vertex_id=-1,
+        multiplicity=1,
+        fold_order=2,
+        index_agrees=True,
+        ascent_branches=ascent,
+        descent_branches=descent,
+    )
+
+
+def _make_basin(
+    center_id: str, polarity: str, pos: tuple[float, float, float]
+) -> BasinCenter:
+    return BasinCenter(
+        center_id=center_id,
+        polarity=polarity,
+        position=pos,
+        value=0.0,
+        is_effective=False,
+        vertex_id=-1,
+    )
+
+
+class TestBuildMorseSmaleAdjacency:
+    """Tests for build_morse_smale_adjacency."""
+
+    def test_simple_two_saddle_topology(self) -> None:
+        """Two saddles, one max, two minima; verify adjacency is built correctly."""
+        # Max is at +z, two minima along ±x, saddles at ±y
+        center = (0.0, 0.0, 0.0)
+
+        max_a = _make_basin("MAX_A", "maximum", (0.0, 0.0, 1.0))
+        min_1 = _make_basin("MIN_1", "minimum", (1.0, 0.0, 0.0))
+        min_2 = _make_basin("MIN_2", "minimum", (-1.0, 0.0, 0.0))
+
+        # Saddle S1 at (0, 1, 0): ascent toward +z, descent toward +x
+        seed1 = _make_seed(
+            "S1",
+            saddle_pos=(0.0, 1.0, 0.0),
+            asc_tangents=[(0.0, 0.0, 1.0)],  # toward MAX_A
+            desc_tangents=[(1.0, 0.0, 0.0)],  # toward MIN_1
+        )
+        # Saddle S2 at (0, -1, 0): ascent toward +z, descent toward -x
+        seed2 = _make_seed(
+            "S2",
+            saddle_pos=(0.0, -1.0, 0.0),
+            asc_tangents=[(0.0, 0.0, 1.0)],  # toward MAX_A
+            desc_tangents=[(-1.0, 0.0, 0.0)],  # toward MIN_2
+        )
+
+        adj = build_morse_smale_adjacency(
+            seeds=[seed1, seed2],
+            basin_centers=[max_a, min_1, min_2],
+            center=center,
+        )
+
+        assert "S1" in adj and "S2" in adj
+        assert "MAX_A" in adj["S1"]["max"]
+        assert "MAX_A" in adj["S2"]["max"]
+        assert "MIN_1" in adj["S1"]["min"]
+        assert "MIN_2" in adj["S2"]["min"]
+
+    def test_empty_seeds(self) -> None:
+        """Empty seed list produces empty adjacency."""
+        adj = build_morse_smale_adjacency([], [], (0.0, 0.0, 0.0))
+        assert adj == {}
+
+    def test_no_basin_centers_returns_nones_filtered(self) -> None:
+        """With no basin centers, adjacency entries have empty lists."""
+        seed = _make_seed(
+            "S1",
+            (0.0, 1.0, 0.0),
+            [(0.0, 0.0, 1.0)],
+            [(-1.0, 0.0, 0.0)],
+        )
+        adj = build_morse_smale_adjacency([seed], [], (0.0, 0.0, 0.0))
+        assert adj["S1"]["max"] == []
+        assert adj["S1"]["min"] == []
+
+
+# ---------------------------------------------------------------------------
+# Full validate_all_basin_boundaries
+# ---------------------------------------------------------------------------
+
+
+class TestValidateAllBasinBoundaries:
+    """Tests for validate_all_basin_boundaries."""
+
+    def test_all_valid(self) -> None:
+        # Tetrahedron-like Morse topology: 1 max, 3 minima, 3 saddles
+        adj = _make_adj(
+            {
+                "S1": (["MAX_A", "X"], ["MIN_1", "MIN_2"]),
+                "S2": (["MAX_A", "X"], ["MIN_2", "MIN_3"]),
+                "S3": (["MAX_A", "X"], ["MIN_3", "MIN_1"]),
+            }
+        )
+        bc_max = _make_basin("MAX_A", "maximum", (0.0, 0.0, 1.0))
+        bc_min1 = _make_basin("MIN_1", "minimum", (1.0, 0.0, -0.5))
+        bc_min2 = _make_basin("MIN_2", "minimum", (-0.5, 0.866, -0.5))
+        bc_min3 = _make_basin("MIN_3", "minimum", (-0.5, -0.866, -0.5))
+        basin_centers = [bc_max, bc_min1, bc_min2, bc_min3]
+
+        result = validate_all_basin_boundaries(basin_centers, adj)
+        assert result.is_valid, result.summary
+        assert result.n_max_valid == 1
+        assert result.n_min_valid == 3
+        assert "✓" in result.summary
+
+    def test_empty_inputs(self) -> None:
+        result = validate_all_basin_boundaries([], {})
+        assert result.is_valid
+        assert result.n_max_total == 0
+        assert result.n_min_total == 0
+
+    def test_partial_failure_reported(self) -> None:
+        # MAX_A is valid, MAX_B has no adjacent saddles → fails
+        adj = _make_adj(
+            {
+                "S1": (["MAX_A", "X"], ["MIN_1", "MIN_2"]),
+                "S2": (["MAX_A", "X"], ["MIN_2", "MIN_1"]),
+            }
+        )
+        bc_a = _make_basin("MAX_A", "maximum", (0.0, 0.0, 1.0))
+        bc_b = _make_basin("MAX_B", "maximum", (1.0, 0.0, 0.0))
+
+        result = validate_all_basin_boundaries([bc_a, bc_b], adj)
+        assert not result.is_valid
+        assert "MAX_B" in result.failing_ids
+        assert "MAX_A" not in result.failing_ids
+        assert result.n_max_valid == 1
+        assert result.n_max_total == 2
+
+
+# ---------------------------------------------------------------------------
+# Integration test against the diagnose_params.py pipeline
+# ---------------------------------------------------------------------------
+
+import os
 
 import pytest
 
-from gba_topology2.src.basin_validator import (
-    is_valid_max_basin_boundary,
-    is_valid_min_basin_boundary,
-    validate_basin_boundaries,
+from gba_topology2.src.basin_validator import SimplificationValidity
+
+ETHENE_PARAMS_JSON = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)),
+    "ethene4_atom1_params.json",
 )
-from gba_topology2.src.morse_detector import CriticalPoint
 
 
-class TestMaxBasinBoundaryValidation:
-    """Test max basin boundary alternation logic."""
+def _run_validation(overrides: list[str]) -> SimplificationValidity:
+    """Helper: run the full diagnose_params pipeline + validator."""
+    import json
 
-    def test_valid_alternating_pattern_min_sad_min_sad(self) -> None:
-        """Test simple alternating min-sad-min-sad pattern."""
-        boundary_types = ["minimum", "saddle", "minimum", "saddle"]
-        is_valid, pattern = is_valid_max_basin_boundary(boundary_types)
-        assert is_valid
-        assert "m-s-m-s" in pattern or "min-sad" in pattern
+    from gba_topology2.diagnose_params import apply_overrides, build_context, run_stages
+    from gba_topology2.src.sphere_viewer import load_params_from_dict
 
-    def test_valid_alternating_pattern_sad_min_sad_min(self) -> None:
-        """Test alternating saddle-first pattern."""
-        boundary_types = ["saddle", "minimum", "saddle", "minimum"]
-        is_valid, pattern = is_valid_max_basin_boundary(boundary_types)
-        assert is_valid
+    with open(ETHENE_PARAMS_JSON) as fh:
+        payload = json.load(fh)
 
-    def test_valid_single_saddle_min_pair(self) -> None:
-        """Test simple 2-element boundary (saddle, minimum)."""
-        boundary_types = ["saddle", "minimum"]
-        is_valid, pattern = is_valid_max_basin_boundary(boundary_types)
-        assert is_valid
+    params = load_params_from_dict(payload)
+    apply_overrides(params, overrides)
+    ctx = build_context(params, plt_path=None, atom_num=None, field_name=None)
+    run_stages(ctx)
 
-    def test_invalid_two_consecutive_minima(self) -> None:
-        """Test that consecutive minima fail alternation."""
-        boundary_types = ["minimum", "minimum", "saddle"]
-        is_valid, pattern = is_valid_max_basin_boundary(boundary_types)
-        assert not is_valid
-        assert "non-alternating" in pattern
-
-    def test_invalid_two_consecutive_saddles(self) -> None:
-        """Test that consecutive saddles fail alternation."""
-        boundary_types = ["saddle", "saddle", "minimum"]
-        is_valid, pattern = is_valid_max_basin_boundary(boundary_types)
-        assert not is_valid
-
-    def test_invalid_contains_maximum(self) -> None:
-        """Test that a maximum in the boundary fails for max basin."""
-        boundary_types = ["minimum", "maximum", "saddle"]
-        is_valid, pattern = is_valid_max_basin_boundary(boundary_types)
-        assert not is_valid
-        assert "invalid type" in pattern
-
-    def test_empty_boundary(self) -> None:
-        """Test that empty boundary fails."""
-        boundary_types: list[str] = []
-        is_valid, pattern = is_valid_max_basin_boundary(boundary_types)
-        assert not is_valid
-        assert "empty" in pattern
+    adj = build_morse_smale_adjacency(ctx.seeds, ctx.basin_centers, ctx.center)
+    return validate_all_basin_boundaries(ctx.basin_centers, adj)
 
 
-class TestMinBasinBoundaryValidation:
-    """Test min basin boundary alternation logic."""
+@pytest.mark.skipif(
+    not os.path.exists(ETHENE_PARAMS_JSON),
+    reason="ethene4_atom1_params.json not present",
+)
+class TestEtheneIntegration:
+    """Pipeline integration tests using the saved ethene4 parameter snapshot."""
 
-    def test_valid_alternating_pattern_max_sad_max_sad(self) -> None:
-        """Test simple alternating max-sad-max-sad pattern."""
-        boundary_types = ["maximum", "saddle", "maximum", "saddle"]
-        is_valid, pattern = is_valid_min_basin_boundary(boundary_types)
-        assert is_valid
+    def test_default_params_are_valid(self) -> None:
+        """The saved default parameters (k_pitch=2.0, k_bridge=3.0) must be valid."""
+        validity = _run_validation([])
+        assert validity.is_valid, validity.summary
+        assert validity.n_max_valid == 3
+        assert validity.n_min_valid == 4
 
-    def test_valid_alternating_pattern_sad_max_sad_max(self) -> None:
-        """Test alternating saddle-first pattern."""
-        boundary_types = ["saddle", "maximum", "saddle", "maximum"]
-        is_valid, pattern = is_valid_min_basin_boundary(boundary_types)
-        assert is_valid
+    def test_k_pitch_4_k_bridge_1_is_valid(self) -> None:
+        """k_pitch=4.0 with k_bridge=1.0 produces a different valid simplification."""
+        validity = _run_validation(["k_pitch=4.0", "k_bridge=1.0"])
+        assert validity.is_valid, validity.summary
 
-    def test_valid_single_sad_max_pair(self) -> None:
-        """Test simple 2-element boundary."""
-        boundary_types = ["saddle", "maximum"]
-        is_valid, pattern = is_valid_min_basin_boundary(boundary_types)
-        assert is_valid
+    def test_k_pitch_1_is_invalid(self) -> None:
+        """k_pitch=1.0 (under-clustered) must be detected as invalid."""
+        validity = _run_validation(["k_pitch=1.0"])
+        assert not validity.is_valid
 
-    def test_invalid_two_consecutive_maxima(self) -> None:
-        """Test that consecutive maxima fail alternation."""
-        boundary_types = ["maximum", "maximum", "saddle"]
-        is_valid, pattern = is_valid_min_basin_boundary(boundary_types)
-        assert not is_valid
+    def test_k_pitch_4_alone_is_invalid(self) -> None:
+        """k_pitch=4.0 alone (over-clustered with bridging) must be invalid."""
+        validity = _run_validation(["k_pitch=4.0"])
+        assert not validity.is_valid
 
-    def test_invalid_contains_minimum(self) -> None:
-        """Test that a minimum in the boundary fails for min basin."""
-        boundary_types = ["maximum", "minimum", "saddle"]
-        is_valid, pattern = is_valid_min_basin_boundary(boundary_types)
-        assert not is_valid
-        assert "invalid type" in pattern
-
-
-class TestBasinBoundaryValidationIntegration:
-    """Test full basin validation pipeline."""
-
-    def test_simple_valid_configuration(self) -> None:
-        """Test minimal valid configuration: 1 max, 1 min, alternating saddles between."""
-        # For a valid alternating boundary with just 1 max and 1 min,
-        # we need saddles that alternate. With 2 saddles we get: sad, sad, min
-        # which fails. So we need at least 3 saddles or a different approach.
-        # For now, test that validation runs without error on mixed CPs.
-        max_cp = CriticalPoint(
-            vertex_id=0,
-            cp_type="maximum",
-            value=10.0,
-            position=(0.0, 0.0, 1.0),
-            multiplicity=1,
-        )
-
-        min_cp = CriticalPoint(
-            vertex_id=1,
-            cp_type="minimum",
-            value=-10.0,
-            position=(0.0, 0.0, -1.0),
-            multiplicity=1,
-        )
-
-        sad_cp1 = CriticalPoint(
-            vertex_id=2,
-            cp_type="saddle",
-            value=0.0,
-            position=(1.0, 0.0, 0.0),
-            multiplicity=1,
-        )
-
-        sad_cp2 = CriticalPoint(
-            vertex_id=3,
-            cp_type="saddle",
-            value=0.0,
-            position=(-1.0, 0.0, 0.0),
-            multiplicity=1,
-        )
-
-        sad_cp3 = CriticalPoint(
-            vertex_id=4,
-            cp_type="saddle",
-            value=0.0,
-            position=(0.0, 1.0, 0.0),
-            multiplicity=1,
-        )
-
-        all_cps = [max_cp, min_cp, sad_cp1, sad_cp2, sad_cp3]
-
-        result = validate_basin_boundaries(all_cps)
-
-        # With 3 saddles and 1 min, pattern for max basin is: sad, sad, sad, min
-        # which has consecutive saddles and fails. This is expected.
-        # The key is that validation runs without error.
-        assert isinstance(result.num_max_basins, int)
-        assert isinstance(result.num_min_basins, int)
-        assert len(result.validation_results) == 2  # 1 max + 1 min
-
-    def test_empty_cp_list(self) -> None:
-        """Test with empty CP list."""
-        result = validate_basin_boundaries([])
-        assert result.is_valid
-        assert result.num_max_basins == 0
-        assert result.num_min_basins == 0
-
-    def test_only_extrema_no_saddles(self) -> None:
-        """Test with only extrema (no saddles)."""
-        max_cp1 = CriticalPoint(
-            vertex_id=0,
-            cp_type="maximum",
-            value=10.0,
-            position=(0.0, 0.0, 1.0),
-            multiplicity=1,
-        )
-        max_cp2 = CriticalPoint(
-            vertex_id=1,
-            cp_type="maximum",
-            value=9.0,
-            position=(1.0, 1.0, 1.0),
-            multiplicity=1,
-        )
-        min_cp = CriticalPoint(
-            vertex_id=2,
-            cp_type="minimum",
-            value=-10.0,
-            position=(0.0, 0.0, -1.0),
-            multiplicity=1,
-        )
-
-        all_cps = [max_cp1, max_cp2, min_cp]
-        result = validate_basin_boundaries(all_cps)
-
-        # Empty boundaries may be invalid
-        assert result.num_max_basins + result.num_min_basins >= 0
-
-    def test_only_visible_basins_validated(self) -> None:
-        """Test that only visible basin IDs are validated."""
-        max_cp1 = CriticalPoint(
-            vertex_id=0,
-            cp_type="maximum",
-            value=10.0,
-            position=(0.0, 0.0, 1.0),
-            multiplicity=1,
-        )
-        max_cp2 = CriticalPoint(
-            vertex_id=1,
-            cp_type="maximum",
-            value=9.0,
-            position=(1.0, 1.0, 1.0),
-            multiplicity=1,
-        )
-
-        all_cps = [max_cp1, max_cp2]
-
-        # Only validate max_cp1
-        result = validate_basin_boundaries(
-            all_cps, visible_max_ids={0}, visible_min_ids=set()
-        )
-
-        # Should have at most 1 max basin validated
-        assert result.num_max_basins <= 1
-
-
-class TestBasinValidationErrorReporting:
-    """Test error reporting and edge cases."""
-
-    def test_error_summary_all_valid(self) -> None:
-        """Test error summary when all basins are valid."""
-        max_cp = CriticalPoint(
-            vertex_id=0,
-            cp_type="maximum",
-            value=10.0,
-            position=(0.0, 0.0, 1.0),
-            multiplicity=1,
-        )
-
-        sad_cp = CriticalPoint(
-            vertex_id=1,
-            cp_type="saddle",
-            value=5.0,
-            position=(0.0, 1.0, 0.5),
-            multiplicity=1,
-        )
-
-        min_cp = CriticalPoint(
-            vertex_id=2,
-            cp_type="minimum",
-            value=-10.0,
-            position=(0.0, 0.0, -1.0),
-            multiplicity=1,
-        )
-
-        all_cps = [max_cp, sad_cp, min_cp]
-        result = validate_basin_boundaries(all_cps)
-
-        if result.is_valid:
-            assert "✓" in result.error_summary
-
-    def test_alternation_error_tracking(self) -> None:
-        """Test that alternation errors are correctly identified."""
-        boundary_types = ["minimum", "minimum", "saddle"]
-        is_valid, pattern = is_valid_max_basin_boundary(boundary_types)
-
-        assert not is_valid
-
-    def test_multi_cp_configuration(self) -> None:
-        """Test a more complex configuration with multiple CPs of each type."""
-        max_cps = [
-            CriticalPoint(
-                vertex_id=i, cp_type="maximum", value=10.0 - i, position=(float(i), 0.0, 1.0)
-            )
-            for i in range(3)
-        ]
-
-        min_cps = [
-            CriticalPoint(
-                vertex_id=i + 10,
-                cp_type="minimum",
-                value=-10.0 + i,
-                position=(float(i), 0.0, -1.0),
-            )
-            for i in range(3)
-        ]
-
-        sad_cps = [
-            CriticalPoint(
-                vertex_id=i + 20,
-                cp_type="saddle",
-                value=0.0,
-                position=(float(i), float(i % 2), 0.0),
-                multiplicity=1,
-            )
-            for i in range(4)
-        ]
-
-        all_cps = max_cps + min_cps + sad_cps
-        result = validate_basin_boundaries(all_cps)
-
-        # All 3 max and 3 min basins have validation results
-        assert len(result.validation_results) == 6
-        # With 4 saddles and 3 mins/maxes: pattern is sad, sad, sad, sad, min/max, min/max, min/max
-        # which has consecutive saddles - not alternating, so all should fail
-        # (This is the limitation of global boundary validation without gradient flow info)
-        assert len(result.failing_basins) == 6
-        assert not result.is_valid
-        assert result.num_max_basins == 0  # All maxima failed validation
-        assert result.num_min_basins == 0  # All minima failed validation
+    def test_k_bridge_5_is_invalid(self) -> None:
+        """k_bridge=5.0 (aggressive bridging) must be detected as invalid."""
+        validity = _run_validation(["k_bridge=5.0"])
+        assert not validity.is_valid
