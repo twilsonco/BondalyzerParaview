@@ -1523,3 +1523,32 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   - `mypy gba_topology2 tests`: clean (no variable shadowing, proper type annotations).
   - Pre-commit hook suite: all pass.
 - **Next Steps**: Implement parameter space search (grid/adaptive) and ranking algorithm to identify optimal simplification parameters automatically (Tasks BV-2, BV-3, BV-4).
+
+### [Entry 040] Cluster-Aware Separatrix Tracer + Traced Morse-Smale Adjacency (`separatrix_tracer.py`, `basin_validator.py`, `diagnose_params.py`)
+- **Objective**: Replace the tangent-direction heuristic in the basin validator with adjacency derived from actual gradient flow, so basin boundaries are read from the Morse-Smale complex and are robust to mesh-scale noise.
+- **Two defects in the previous design** (raised in review):
+  1. **The cyclic link sits inside the noise floor.** `build_cyclic_link` reads the sign pattern of `f(u) - f(v)` on the saddle's 1-ring of mesh neighbours. On fine meshes that ring spans ~`delta_theta_mesh`, exactly the angular scale of the noise that manufactures spurious CPs, so the sector count measures noise. The project already has the noise-robust substitute: `profile_boundary_loop` (IDW-interpolated `f(phi)` on an adjustable-radius circle) and `expand_excision_seed` (grow the ring until valleys = ridges = k = index). The launch stage already runs it; the validator now consumes its output.
+  2. **Naive gradient following terminates on spurious CPs.** Two sub-cases, both observed on Pd20K:
+     - *Transit clusters* (MC10, chi = 0, annihilated): not a CP at all, but the noise inside it contains spurious extrema that trap a streamline.
+     - *Cluster targets* (MC28, 9 CPs): the real destination is the effective CP, but a streamline dies in the first spurious dip on the cluster's flank.
+- **Design: spherical-cap zones.** Every CP is a cap (unit direction + cosine radius) in the centred atom frame:
+  - `absorb_max` / `absorb_min` / `absorb_sad`: entering ends the walk and yields the label.
+  - `passthrough`: annihilated (net-index-0) units; entering never terminates.
+  - The launching saddle's own cap is excluded per seed (port seeds live inside it).
+  Absorption caps for effective CPs use `eff_ring_radius` (the reduction unit's excision ring), so a whole cluster absorbs as ONE CP. That single rule fixes the cluster-target case.
+- **Implementation** (`gba_topology2/src/separatrix_tracer.py`):
+  - `TraceZone` (cap + `contains`), `TraceOutcome` (target, status, path, `confidence` = high/medium/low).
+  - `trace_separatrix`: greedy steepest-ascent/descent on the mesh 1-skeleton. Strict monotonicity in the evaluated field makes cycles impossible. Statuses: `absorbed` (high), `raw_extremum` (medium), `stalled`/`max_steps` (low).
+  - `make_zones`, `build_walk_adjacency`, `build_walk_adjacency_from_edges`.
+  - **Great-circle tunneling**: a pass-through disk on a noisy slope is a genuine sink of the raw data -- every boundary vertex on its far side is itself a spurious extremum, so a boundary-scan escape re-traps the walk (verified: 5 branches escaped to another local minimum). The escape instead projects the incoming trajectory forward along the great circle through (entry -> centre) and resumes one radius-plus-margin beyond the centre, recording the zone in `zone_exited` so the walk can never re-enter it. Rescued 5 of 6 stranded Pd20K branches (42 -> 47 of 48 absorbed).
+- **`build_traced_adjacency`** (`basin_validator.py`): maps each branch's terminal vertex to a zone label, buckets by zone kind (not by walk direction, so an ascent that lands on a saddle is recorded as a saddle-saddle edge), drops self-loops, and never emits `passthrough` labels. Returns `(SaddleAdjacency, outcomes)` for confidence reporting.
+- **Harness** (`diagnose_params.py`): new `validate` stage + `build_trace_zones(ctx)`; `RunContext.annihilated_units` populated by the reduction stage (it was a local before).
+- **Results**:
+  - **ethene4** (saved snapshot): 20/20 branches absorbed, **3/3 max + 4/4 min basins valid**; traced adjacency **agrees with the heuristic on all 5 saddles**; reproduce check still 44/44.
+  - **ethene4 sweep**: traced and heuristic agree on every valid/invalid verdict (default and `k_pitch=4.0 k_bridge=1.0` valid; `k_pitch=1.0`, `k_pitch=4.0`, `k_bridge=5.0` invalid). The traced version is strictly more conservative on the invalid sets (e.g. `k_pitch=1.0`: 0/5 max valid vs the heuristic's 1/5), because it sees true rim connectivity instead of nearest-direction guesses.
+  - **Pd20K** (the noisy field, 22 annihilated clusters): 47/48 absorbed, 4/6 max + 7/8 min valid. The residual failure is a genuine topological finding, not a tracer artifact: `MIN_11` has degree 1 on the rims of `E-MAX_MC24` and `E-MAX_MC26`, i.e. an open rim at the saved parameters.
+- **Validation**: `uv run pytest`: **87 passed** in the three affected files (20 new tracer tests, 13 new traced-adjacency tests, 40 validator total). `ruff format` / `ruff check` / `mypy`: clean. Pre-commit suite: green.
+- **Open next**:
+  1. **Saddle-saddle separatrix edges** are recorded under the adjacency's `"sad"` key but not consumed: the cycle validator assumes a bipartite saddle<->extremum rim. Corridors of spurious saddles (the Pd20K case) need rims that route through saddle-saddle edges.
+  2. The `raw_extremum` fallback resolves its target by zone lookup at the terminal vertex; a low-confidence branch should fall back to the tangent heuristic explicitly.
+  3. Tracer cost is O(branches x hops) per parameter pair; measure before the BV-2 grid search on 20K-vertex meshes.

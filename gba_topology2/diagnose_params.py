@@ -15,6 +15,7 @@ Stages (viewer order, --only stops after the named one, inclusive):
     reduction     Step 6 effective-CP reduction + harmonic nudge
     basins        extract_basin_centers
     launch        expand_excision_seed (excision-boundary launch seeds)
+    validate      separatrix tracing + Morse-Smale adjacency + basin validation
 
 The saved file's derived_metrics are diffed against the recomputed ones, so the
 run answers "does this parameter set reproduce what I saw?" with an exit code
@@ -48,6 +49,10 @@ if workspace_root not in sys.path:
     sys.path.insert(0, workspace_root)
 
 from gba_topology2.src.basin_center import BasinCenter, extract_basin_centers
+from gba_topology2.src.basin_validator import (
+    build_traced_adjacency,
+    validate_all_basin_boundaries,
+)
 from gba_topology2.src.catastrophe_classifier import (
     EffectiveCatastrophe,
     classify_catastrophes,
@@ -78,7 +83,12 @@ from gba_topology2.src.polarity_detector import (
     effective_reduction_decision,
 )
 from gba_topology2.src.saddle_launch import SaddleLaunchSeed
-from gba_topology2.src.sphere_frame import to_global
+from gba_topology2.src.separatrix_tracer import (
+    TraceZone,
+    build_walk_adjacency,
+    make_zones,
+)
+from gba_topology2.src.sphere_frame import to_global, to_local
 from gba_topology2.src.sphere_viewer import (
     PARAM_BOOL_KEYS,
     PARAM_CONTEXT_STRING_KEYS,
@@ -185,6 +195,7 @@ class RunContext:
     basin_centers: list[BasinCenter] = field(default_factory=list)
     seeds: list[SaddleLaunchSeed] = field(default_factory=list)
     launch_stats: dict[str, Any] = field(default_factory=dict)
+    annihilated_units: set[str] = field(default_factory=set)
 
     def require_morse(self) -> MorseDetectionResult:
         """Return the Morse result, requiring the morse stage to have run.
@@ -630,6 +641,7 @@ def stage_reduction(ctx: RunContext) -> dict[str, Any]:
     ctx.hidden_vertex_ids = hidden
     ctx.effective_cps = effs
     ctx.eff_ring_radius = eff_ring
+    ctx.annihilated_units = set(annihilated)
     ctx.display_counts = {
         "minima": n_min,
         "maxima": n_max,
@@ -733,6 +745,130 @@ def stage_launch(ctx: RunContext) -> dict[str, Any]:
     return dict(ctx.launch_stats)
 
 
+def build_trace_zones(ctx: RunContext) -> list[TraceZone]:
+    """Assemble absorption and pass-through caps from the finished reduction.
+
+    Labels live in basin-center/seed id space so traced endpoints plug straight
+    into ``SaddleAdjacency``: raw CPs as ``MAX_<vid>`` / ``MIN_<vid>`` /
+    ``SAD_<vid>``, effective CPs as their ``id_label`` (``E-MAX_MC28`` ...).
+
+    Zone radii:
+    - effective CPs: the excision radius recorded at reduction
+      (``eff_ring_radius``), so the whole cluster absorbs as one CP;
+    - visible raw CPs: the lone-critical-point rule used by the launch seeds;
+    - annihilated (net-index-0) units: pass-through caps at the unit's own
+      angular radius, so walks cross noise clusters without terminating.
+
+    Args:
+        ctx: Finished run context (reduction and basins stages must have run).
+
+    Returns:
+        Zone list for ``build_traced_adjacency``.
+    """
+    morse = ctx.require_morse()
+    k_pitch = float(_p(ctx, "k_pitch"))
+    lone_a0 = max(math.radians(1.5), k_pitch * ctx.delta_theta_rad / 2.0)
+
+    maxima: list[tuple[str, tuple[float, float, float]]] = []
+    minima: list[tuple[str, tuple[float, float, float]]] = []
+    saddles: list[tuple[str, tuple[float, float, float]]] = []
+    caps: dict[str, float] = {}
+
+    for cp in morse.maxima:
+        if cp.vertex_id in ctx.hidden_vertex_ids:
+            continue
+        label = f"MAX_{cp.vertex_id}"
+        maxima.append((label, cp.position))
+        caps[label] = lone_a0
+    for cp in morse.minima:
+        if cp.vertex_id in ctx.hidden_vertex_ids:
+            continue
+        label = f"MIN_{cp.vertex_id}"
+        minima.append((label, cp.position))
+        caps[label] = lone_a0
+    for cp in morse.saddles:
+        if cp.vertex_id in ctx.hidden_vertex_ids:
+            continue
+        label = f"SAD_{cp.vertex_id}"
+        saddles.append((label, cp.position))
+        caps[label] = lone_a0
+
+    for eff in ctx.effective_cps:
+        label = str(eff["id_label"])
+        pos = to_local(tuple(eff["position"]), ctx.center)
+        kind = eff["type"]
+        if kind == "E-MAX":
+            maxima.append((label, pos))
+        elif kind == "E-MIN":
+            minima.append((label, pos))
+        elif kind == "E-SAD":
+            saddles.append((label, pos))
+        else:
+            continue
+        caps[label] = ctx.eff_ring_radius.get(label, lone_a0)
+
+    passthrough: list[tuple[str, tuple[float, float, float], float]] = []
+    by_id = {u.unit_id: u for u in ctx.units}
+    for uid in sorted(ctx.annihilated_units):
+        unit = by_id.get(uid)
+        if unit is None:
+            continue
+        passthrough.append(
+            (
+                f"ANNUL_{uid}",
+                unit.centroid,
+                max(unit.as_cluster.angular_radius_rad, lone_a0),
+            )
+        )
+
+    return make_zones(
+        ctx.pts,
+        ctx.triangles,
+        visible_maxima=maxima,
+        visible_minima=minima,
+        visible_saddles=saddles,
+        absorption_caps=caps,
+        passthrough=passthrough,
+    )
+
+
+def stage_validate(ctx: RunContext) -> dict[str, Any]:
+    """Trace separatrices, build the Morse-Smale adjacency, validate basins.
+
+    Runs the cluster-aware gradient-flow tracer from every converged launch
+    port, maps traced endpoints to basin-center ids, and checks each basin's
+    boundary for the alternating saddle/extremum cycle. The tangent-direction
+    heuristic is recomputed alongside so the two can be compared.
+    """
+    _require_morse_first(ctx)
+    zones = build_trace_zones(ctx)
+    neighbors = build_walk_adjacency(ctx.triangles, int(ctx.pts.shape[0]))
+
+    adj, outcomes = build_traced_adjacency(
+        seeds=ctx.seeds,
+        pts=ctx.pts,
+        f_vals=ctx.f_vals,
+        neighbors=neighbors,
+        zones=zones,
+    )
+    validity = validate_all_basin_boundaries(ctx.basin_centers, adj)
+
+    n_branches = sum(len(o) for o in outcomes.values())
+    all_outcomes = [o for branch_list in outcomes.values() for o in branch_list]
+    n_absorbed = sum(1 for o in all_outcomes if o.status == "absorbed")
+    n_sad_sad = sum(len(v.get("sad", [])) for v in adj.values())
+
+    return {
+        "is_valid": validity.is_valid,
+        "n_max_valid": f"{validity.n_max_valid}/{validity.n_max_total}",
+        "n_min_valid": f"{validity.n_min_valid}/{validity.n_min_total}",
+        "n_branches": n_branches,
+        "n_branches_absorbed": n_absorbed,
+        "n_saddle_saddle_edges": n_sad_sad,
+        "summary": validity.summary,
+    }
+
+
 STAGES: list[tuple[str, Callable[[RunContext], dict[str, Any]]]] = [
     ("geometry", stage_geometry),
     ("morse", stage_morse),
@@ -744,6 +880,7 @@ STAGES: list[tuple[str, Callable[[RunContext], dict[str, Any]]]] = [
     ("reduction", stage_reduction),
     ("basins", stage_basins),
     ("launch", stage_launch),
+    ("validate", stage_validate),
 ]
 
 

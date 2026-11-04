@@ -257,6 +257,7 @@ class TestRunStages:
             "reduction",
             "basins",
             "launch",
+            "validate",
         ]
 
     def test_geometry_only_stop_runs_single_stage(self) -> None:

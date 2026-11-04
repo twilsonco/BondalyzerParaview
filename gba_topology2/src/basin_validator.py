@@ -35,15 +35,22 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+import numpy.typing as npt
 
 from gba_topology2.src.basin_center import BasinCenter
 from gba_topology2.src.saddle_launch import SaddleLaunchSeed
+from gba_topology2.src.separatrix_tracer import (
+    TraceOutcome,
+    TraceZone,
+    trace_separatrix,
+)
 
 __all__ = [
     "BasinBoundaryResult",
     "SaddleAdjacency",
     "SimplificationValidity",
     "build_morse_smale_adjacency",
+    "build_traced_adjacency",
     "is_valid_max_basin_boundary",
     "is_valid_min_basin_boundary",
     "validate_all_basin_boundaries",
@@ -269,6 +276,127 @@ def build_morse_smale_adjacency(
         ]
         adj[seed.saddle_id] = {"max": max_targets, "min": min_targets}
     return adj
+
+
+# ---------------------------------------------------------------------------
+# Traced adjacency (gradient flow, cluster-aware)
+# ---------------------------------------------------------------------------
+
+
+def build_traced_adjacency(
+    seeds: list[SaddleLaunchSeed],
+    pts: npt.NDArray[np.float64],
+    f_vals: npt.NDArray[np.float64],
+    neighbors: list[list[int]],
+    zones: list[TraceZone],
+    *,
+    max_branch_steps: int = 512,
+) -> tuple[SaddleAdjacency, dict[str, list[TraceOutcome]]]:
+    """Build saddle adjacency by tracing separatrix branches across the mesh.
+
+    Each branch launches from the mesh vertex nearest its ``launch_position``
+    and walks the gradient until it enters an absorption cap. Because caps are
+    built per reduction unit (whole cluster = one disk) and annihilated
+    clusters are pass-through zones, the walk ignores spurious extrema inside
+    noise clusters and terminates on the *effective* CP.
+
+    Args:
+        seeds: SaddleLaunchSeed objects from the launch stage.
+        pts: (N, 3) centred-frame mesh vertices.
+        f_vals: (N,) field values.
+        neighbors: Mesh 1-skeleton adjacency from ``build_walk_adjacency``.
+        zones: Trace zones from ``make_zones``; labels must be basin-center
+            ids (``MAX_142`` / ``MIN_5`` / ``E-MAX_MC28`` / ``SAD_7`` ...).
+        max_branch_steps: Hop budget per branch.
+
+    Returns:
+        ``(adjacency, outcomes)`` where adjacency has the same shape as
+        ``build_morse_smale_adjacency`` output (max/min basin ids per saddle)
+        and outcomes maps saddle_id to its per-branch TraceOutcome list for
+        confidence reporting. Saddle-saddle landings are recorded under the
+        ``"sad"`` key of the adjacency entry (not consumed by the current
+        extremum-cycle validator).
+    """
+    zc = np.asarray([z.center_unit for z in zones], dtype=np.float64).reshape(-1, 3)
+    zr = np.asarray([z.cos_radius for z in zones], dtype=np.float64).reshape(-1)
+    norms = np.linalg.norm(pts, axis=1, keepdims=True)
+    punit = np.asarray(pts, dtype=np.float64) / np.where(norms > 0.0, norms, 1.0)
+
+    def nearest_vertex(pos: tuple[float, float, float]) -> int:
+        p = np.asarray(pos, dtype=np.float64)
+        n = float(np.linalg.norm(p))
+        if n <= 0.0:
+            return 0
+        return int(np.argmax(punit @ (p / n)))
+
+    def zone_of_vertex(v: int) -> TraceZone | None:
+        cosines = zc @ punit[v]
+        inside = np.nonzero(cosines >= zr)[0]
+        if len(inside) == 0:
+            return None
+        # Prefer absorption zones over passthrough/exclude at the same vertex.
+        order = {"absorb_max": 0, "absorb_min": 0, "absorb_sad": 1}
+        best = sorted(inside, key=lambda i: (order.get(zones[int(i)].kind, 2), i))
+        return zones[int(best[0])]
+
+    adj: SaddleAdjacency = {}
+    outcomes: dict[str, list[TraceOutcome]] = {}
+
+    for seed in seeds:
+        entry: dict[str, list[str]] = {"max": [], "min": [], "sad": []}
+        branch_outcomes: list[TraceOutcome] = []
+        # The launching saddle's own cap must not absorb its branches: the
+        # port seeds sit inside it.
+        seed_zones = [z for z in zones if z.label != seed.saddle_id]
+
+        for kind, direction in (("ascent", "ascent"), ("descent", "descent")):
+            branches = (
+                seed.ascent_branches if kind == "ascent" else seed.descent_branches
+            )
+            for br in branches:
+                v0 = nearest_vertex(br.launch_position)
+                out = trace_separatrix(
+                    start_vertex=v0,
+                    direction=direction,
+                    pts=pts,
+                    f_vals=f_vals,
+                    neighbors=neighbors,
+                    zones=seed_zones,
+                    max_steps=max_branch_steps,
+                )
+                branch_outcomes.append(out)
+                target = out.target_label
+                if target is None and out.status == "raw_extremum":
+                    z = zone_of_vertex(out.start_vertex)
+                    if z is not None and z.label != seed.saddle_id:
+                        target = z.label
+                        target_kind = z.kind
+                    else:
+                        target_kind = None
+                else:
+                    target_kind = out.target_kind
+                if target is None or target_kind == "passthrough":
+                    continue
+                if target_kind == "absorb_sad":
+                    if target != seed.saddle_id:
+                        entry["sad"].append(target)
+                elif target_kind == "absorb_max":
+                    if target not in entry["max"]:
+                        entry["max"].append(target)
+                elif target_kind == "absorb_min" and target not in entry["min"]:
+                    entry["min"].append(target)
+
+        # A saddle whose own cap absorbed a branch is a self-loop; drop it.
+        self_label = seed.saddle_id
+        for key in ("max", "min", "sad"):
+            entry[key] = [t for t in entry[key] if t != self_label]
+
+        adj[seed.saddle_id] = {"max": entry["max"], "min": entry["min"]}
+        if entry["sad"]:
+            adj[seed.saddle_id]["sad"] = entry["sad"]
+        outcomes[seed.saddle_id] = branch_outcomes
+
+    return adj, outcomes
 
 
 # ---------------------------------------------------------------------------

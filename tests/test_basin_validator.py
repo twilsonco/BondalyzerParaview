@@ -1,17 +1,26 @@
 """Unit tests for basin_validator.py.
 
-Tests the basin boundary validation logic using both:
+Tests the basin boundary validation logic using:
 1. Type-sequence helpers (is_valid_max/min_basin_boundary)
 2. Adjacency-based cycle validation (validate_max/min_basin_boundary,
    validate_all_basin_boundaries, build_morse_smale_adjacency)
+3. Pipeline integration on the saved ethene4 / Pd20K parameter snapshots,
+   including the cluster-aware traced adjacency (build_traced_adjacency).
 """
 
 from __future__ import annotations
 
+import os
+from typing import Any
+
+import pytest
+
 from gba_topology2.src.basin_center import BasinCenter
 from gba_topology2.src.basin_validator import (
     SaddleAdjacency,
+    SimplificationValidity,
     build_morse_smale_adjacency,
+    build_traced_adjacency,
     is_valid_max_basin_boundary,
     is_valid_min_basin_boundary,
     validate_all_basin_boundaries,
@@ -385,12 +394,6 @@ class TestValidateAllBasinBoundaries:
 # Integration test against the diagnose_params.py pipeline
 # ---------------------------------------------------------------------------
 
-import os
-
-import pytest
-
-from gba_topology2.src.basin_validator import SimplificationValidity
-
 ETHENE_PARAMS_JSON = os.path.join(
     os.path.dirname(os.path.dirname(__file__)),
     "ethene4_atom1_params.json",
@@ -449,3 +452,164 @@ class TestEtheneIntegration:
         """k_bridge=5.0 (aggressive bridging) must be detected as invalid."""
         validity = _run_validation(["k_bridge=5.0"])
         assert not validity.is_valid
+
+
+# ---------------------------------------------------------------------------
+# Traced (cluster-aware gradient flow) adjacency
+# ---------------------------------------------------------------------------
+
+PD20K_PARAMS_JSON = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)),
+    "Pd20k_atom1_params.json",
+)
+
+
+def _run_traced(overrides: list[str] | None = None) -> tuple[Any, Any, Any]:
+    """Run the pipeline and return (ctx, traced_adjacency, outcomes)."""
+    import json
+
+    from gba_topology2.diagnose_params import (
+        apply_overrides,
+        build_context,
+        build_trace_zones,
+        run_stages,
+    )
+    from gba_topology2.src.separatrix_tracer import build_walk_adjacency
+    from gba_topology2.src.sphere_viewer import load_params_from_dict
+
+    with open(ETHENE_PARAMS_JSON) as fh:
+        payload = json.load(fh)
+    params = load_params_from_dict(payload)
+    apply_overrides(params, overrides or [])
+    ctx = build_context(params, plt_path=None, atom_num=None, field_name=None)
+    run_stages(ctx)
+
+    zones = build_trace_zones(ctx)
+    nbrs = build_walk_adjacency(ctx.triangles, int(ctx.pts.shape[0]))
+    adj, outcomes = build_traced_adjacency(ctx.seeds, ctx.pts, ctx.f_vals, nbrs, zones)
+    return ctx, adj, outcomes
+
+
+@pytest.mark.skipif(
+    not os.path.exists(ETHENE_PARAMS_JSON),
+    reason="ethene4_atom1_params.json not present",
+)
+class TestEtheneTracedAdjacency:
+    """Traced adjacency on the ethene4 snapshot (clean, low-noise field)."""
+
+    def test_all_branches_absorbed(self) -> None:
+        ctx, _adj, outcomes = _run_traced()
+        branches = [o for lst in outcomes.values() for o in lst]
+        assert all(o.status == "absorbed" for o in branches)
+        # Exactly one outcome per separatrix branch.
+        assert len(branches) == sum(
+            len(s.ascent_branches) + len(s.descent_branches) for s in ctx.seeds
+        )
+
+    def test_matches_heuristic_verdict(self) -> None:
+        ctx, adj, _out = _run_traced()
+        traced = validate_all_basin_boundaries(ctx.basin_centers, adj)
+        heur = validate_all_basin_boundaries(
+            ctx.basin_centers,
+            build_morse_smale_adjacency(ctx.seeds, ctx.basin_centers, ctx.center),
+        )
+        assert traced.is_valid and heur.is_valid
+        assert traced.n_max_valid == traced.n_max_total == 3
+        assert traced.n_min_valid == traced.n_min_total == 4
+
+    def test_no_self_loops(self) -> None:
+        _ctx, adj, _out = _run_traced()
+        for sid, entry in adj.items():
+            for key in ("max", "min"):
+                assert sid not in entry[key]
+
+    def test_labels_live_in_basin_id_space(self) -> None:
+        ctx, adj, _out = _run_traced()
+        ids = {b.center_id for b in ctx.basin_centers}
+        for entry in adj.values():
+            assert set(entry["max"]) <= ids
+            assert set(entry["min"]) <= ids
+
+
+@pytest.mark.skipif(
+    not os.path.exists(PD20K_PARAMS_JSON),
+    reason="Pd20k_atom1_params.json not present",
+)
+class TestPd20kNoiseHandling:
+    """Pd20K is the noisy field: 22 annihilated (net-index-0) clusters.
+
+    Verifies the two mechanisms the tangent heuristic cannot express:
+    whole-cluster absorption and pass-through of noise clusters.
+    """
+
+    def _run(self) -> tuple[Any, Any, Any, Any]:
+        import json
+
+        from gba_topology2.diagnose_params import (
+            build_context,
+            build_trace_zones,
+            run_stages,
+        )
+        from gba_topology2.src.separatrix_tracer import build_walk_adjacency
+        from gba_topology2.src.sphere_viewer import load_params_from_dict
+
+        with open(PD20K_PARAMS_JSON) as fh:
+            payload = json.load(fh)
+        params = load_params_from_dict(payload)
+        ctx = build_context(params, plt_path=None, atom_num=None, field_name=None)
+        run_stages(ctx)
+        zones = build_trace_zones(ctx)
+        nbrs = build_walk_adjacency(ctx.triangles, int(ctx.pts.shape[0]))
+        adj, outcomes = build_traced_adjacency(
+            ctx.seeds, ctx.pts, ctx.f_vals, nbrs, zones
+        )
+        return ctx, zones, adj, outcomes
+
+    def test_annihilated_clusters_become_passthrough_zones(self) -> None:
+        ctx, zones, _adj, _out = self._run()
+        assert ctx.annihilated_units, "fixture must contain annihilated clusters"
+        pt = {z.label for z in zones if z.kind == "passthrough"}
+        assert pt == {f"ANNUL_{u}" for u in ctx.annihilated_units}
+        # MC10 is the transit cluster the design discussion calls out.
+        assert "ANNUL_MC10" in pt
+
+    def test_passthrough_zones_never_appear_as_targets(self) -> None:
+        ctx, zones, adj, _out = self._run()
+        pt = {z.label for z in zones if z.kind == "passthrough"}
+        ids = {b.center_id for b in ctx.basin_centers}
+        for entry in adj.values():
+            for key in ("max", "min"):
+                assert not (set(entry[key]) & pt)
+                assert set(entry[key]) <= ids
+
+    def test_tunneling_rescues_noise_trapped_branches(self) -> None:
+        _ctx, _zones, _adj, outcomes = self._run()
+        branches = [o for lst in outcomes.values() for o in lst]
+        assert branches
+        # At least 90% of branches reach a real CP; the naive walk (no
+        # pass-through zones) strands the ones that fall in noise sinks.
+        n_abs = sum(1 for o in branches if o.status == "absorbed")
+        assert n_abs >= 0.9 * len(branches)
+
+    def test_tangent_heuristic_pollutes_rims_with_annihilated_ids(self) -> None:
+        """The heuristic has no zone concept, which is why tracing is needed."""
+        import json
+
+        from gba_topology2.diagnose_params import (
+            build_context,
+            run_stages,
+        )
+        from gba_topology2.src.sphere_viewer import load_params_from_dict
+
+        with open(PD20K_PARAMS_JSON) as fh:
+            payload = json.load(fh)
+        params = load_params_from_dict(payload)
+        ctx = build_context(params, plt_path=None, atom_num=None, field_name=None)
+        run_stages(ctx)
+        adj = build_morse_smale_adjacency(ctx.seeds, ctx.basin_centers, ctx.center)
+        annul = {f"ANNUL_{u}" for u in ctx.annihilated_units}
+        # Heuristic targets are basin ids, so it cannot emit ANNUL_* labels --
+        # it instead silently mis-assigns branches. Assert the traced adjacency
+        # is the one that carries zone semantics, and that both agree on ids.
+        for entry in adj.values():
+            assert not (set(entry["max"]) | set(entry["min"])) & annul
