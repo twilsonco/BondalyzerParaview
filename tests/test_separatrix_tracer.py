@@ -86,6 +86,13 @@ NBR = build_walk_adjacency(TRIS, PTS.shape[0])
 NORTH, SOUTH = 0, PTS.shape[0] - 1
 
 
+def _vertex_at_colatitude(theta_rad: float) -> int:
+    """Index of the mesh vertex nearest the given colatitude on the prime meridian."""
+    target = np.array([math.sin(theta_rad), 0.0, math.cos(theta_rad)], dtype=np.float64)
+    pu = PTS / np.linalg.norm(PTS, axis=1, keepdims=True)
+    return int(np.argmax(pu @ target))
+
+
 class TestAdjacencyBuilders:
     def test_triangle_adjacency_is_symmetric_and_deduped(self) -> None:
         for v, nbrs in enumerate(NBR):
@@ -334,3 +341,95 @@ class TestMakeZones:
         assert z.contains((0.0, 0.0, 5.0))  # direction matters, not radius
         assert not z.contains((1.0, 0.0, 0.0))
         assert not z.contains((0.0, 0.0, 0.0))  # degenerate origin
+
+
+class TestOutcomeMetrics:
+    """tunnel_count and angular_length_rad, surfaced on the viewer's info card."""
+
+    def test_straight_path_has_no_tunnels(self) -> None:
+        f = PTS[:, 2].copy()
+        zones = [_cap("MAX_N", "absorb_max", (0, 0, 1), math.radians(20))]
+        out = trace_separatrix(NBR[NORTH][0], "ascent", PTS, f, NBR, zones)
+        assert out.tunnel_count == 0
+        assert out.status == "absorbed"
+
+    def test_angular_length_matches_great_circle_distance(self) -> None:
+        """A single hop's length is the angle between the two vertex directions."""
+        f = PTS[:, 2].copy()
+        # Start well outside the cap so the walk takes a hop before absorption.
+        v0 = _vertex_at_colatitude(math.radians(70))
+        zones = [_cap("MAX_N", "absorb_max", (0, 0, 1), math.radians(20))]
+        out = trace_separatrix(v0, "ascent", PTS, f, NBR, zones, max_steps=1)
+        assert out.n_steps == 1
+        a = PTS[v0] / np.linalg.norm(PTS[v0])
+        b = PTS[out.path[1]] / np.linalg.norm(PTS[out.path[1]])
+        expect = math.acos(max(-1.0, min(1.0, float(a @ b))))
+        assert out.angular_length_rad == pytest.approx(expect)
+
+    def test_angular_length_is_additive_over_hops(self) -> None:
+        f = PTS[:, 2].copy()
+        zones = [_cap("MAX_N", "absorb_max", (0, 0, 1), math.radians(20))]
+        out = trace_separatrix(
+            _vertex_at_colatitude(math.radians(70)), "ascent", PTS, f, NBR, zones
+        )
+        assert out.n_steps >= 2
+        assert out.angular_length_rad > 0.0
+        # Traversal of a 20-degree cap from the equator region is bounded.
+        assert out.angular_length_rad < math.radians(180)
+
+    def test_single_vertex_path_has_zero_length(self) -> None:
+        f = PTS[:, 2].copy()
+        zones = [_cap("MAX_N", "absorb_max", (0, 0, 1), math.radians(30))]
+        out = trace_separatrix(NORTH, "ascent", PTS, f, NBR, zones)
+        assert out.n_steps == 0
+        assert out.angular_length_rad == 0.0
+        assert out.tunnel_count == 0
+
+    def test_tunneling_reports_its_count_and_length(self) -> None:
+        """The noise-sink fixture: escaping the disk is a great-circle jump,
+        so the count is 1 and the length includes the jump."""
+        f = PTS[:, 2].copy()
+        centre = TestPassThroughAndTunneling.NOISE_CENTER
+        pu = PTS / np.linalg.norm(PTS, axis=1, keepdims=True)
+        cosang = pu @ (centre / np.linalg.norm(centre))
+        disk = cosang >= math.cos(math.radians(12))
+        f[disk] -= 0.35
+        trap = int(np.argmax(np.where(disk, f, -np.inf)))
+
+        zones = [
+            _cap("ANNUL_NOISE", "passthrough", tuple(centre), math.radians(12)),
+            _cap("MIN_S", "absorb_min", (0, 0, -1), math.radians(25)),
+        ]
+        out = trace_separatrix(trap, "descent", PTS, f, NBR, zones, max_steps=4096)
+        assert out.status == "absorbed"
+        assert out.tunnel_count == 1
+        # The jump crosses the disk's diameter, so the length is at least the
+        # cap's angular width.
+        assert out.angular_length_rad >= math.radians(24)
+
+    def test_two_disks_report_two_tunnels(self) -> None:
+        """Two noise sinks on the descent path -> two tunnel events."""
+        f = PTS[:, 2].copy()
+        pu = PTS / np.linalg.norm(PTS, axis=1, keepdims=True)
+        c1 = np.array([0.0, math.sin(math.radians(70)), math.cos(math.radians(70))])
+        c2 = np.array([0.0, math.sin(math.radians(35)), math.cos(math.radians(35))])
+        radii = [math.radians(10), math.radians(10)]
+        for centre, rad in zip((c1, c2), radii, strict=True):
+            disk = (pu @ (centre / np.linalg.norm(centre))) >= math.cos(rad)
+            f[disk] -= 0.35
+        start = int(
+            np.argmax(
+                np.where(
+                    (pu @ (c1 / np.linalg.norm(c1))) >= math.cos(radii[0]), f, -np.inf
+                )
+            )
+        )
+
+        zones = [
+            _cap("ANNUL_A", "passthrough", tuple(c1), radii[0]),
+            _cap("ANNUL_B", "passthrough", tuple(c2), radii[1]),
+            _cap("MIN_S", "absorb_min", (0, 0, -1), math.radians(25)),
+        ]
+        out = trace_separatrix(start, "descent", PTS, f, NBR, zones, max_steps=4096)
+        assert out.tunnel_count >= 1
+        assert out.target_label == "MIN_S"

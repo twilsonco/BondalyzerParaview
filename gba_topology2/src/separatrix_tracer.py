@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from itertools import pairwise
 from typing import Any
 
 import numpy as np
@@ -118,6 +119,12 @@ class TraceOutcome:
             ``"max_steps"``.
         n_steps: Number of mesh hops taken.
         path: Vertex ids visited, start first (kept for debugging/inspection).
+        tunnel_count: How many noise disks the walk had to tunnel straight
+            through. Non-zero means the branch crossed an annihilated cluster,
+            i.e. the reduction's judgement that a region is not a CP was needed
+            to complete the trace.
+        angular_length_rad: Total angular distance covered along the path,
+            including the great-circle jumps made when tunneling.
     """
 
     direction: str
@@ -127,6 +134,8 @@ class TraceOutcome:
     status: str
     n_steps: int
     path: list[int] = field(default_factory=list)
+    tunnel_count: int = 0
+    angular_length_rad: float = 0.0
 
     @property
     def confidence(self) -> str:
@@ -201,6 +210,35 @@ def trace_separatrix(
         cosines = zc @ _unit(pts, v)
         return [int(i) for i in np.nonzero(cosines >= zr)[0]]
 
+    def angular_length(visited: list[int]) -> float:
+        """Sum of great-circle angles between consecutive visited vertices."""
+        total = 0.0
+        for a, b in pairwise(visited):
+            c = float(np.dot(_unit(pts, a), _unit(pts, b)))
+            total += math.acos(max(-1.0, min(1.0, c)))
+        return total
+
+    def finish(
+        visited: list[int],
+        end_vertex: int,
+        label: str | None,
+        kind: str | None,
+        status: str,
+        tunnels: int,
+    ) -> TraceOutcome:
+        """Build the outcome, measuring the path's angular length once."""
+        return TraceOutcome(
+            direction=direction,
+            start_vertex=end_vertex,
+            target_label=label,
+            target_kind=kind,
+            status=status,
+            n_steps=max(len(visited) - 1, 0),
+            path=visited,
+            tunnel_count=tunnels,
+            angular_length_rad=angular_length(visited),
+        )
+
     path: list[int] = [int(start_vertex)]
     cur = int(start_vertex)
 
@@ -208,15 +246,7 @@ def trace_separatrix(
     # target disk (tiny saddles) should terminate immediately.
     hit = zone_hit(cur)
     if hit is not None:
-        return TraceOutcome(
-            direction=direction,
-            start_vertex=cur,
-            target_label=zones[hit].label,
-            target_kind=zones[hit].kind,
-            status="absorbed",
-            n_steps=0,
-            path=path,
-        )
+        return finish(path, cur, zones[hit].label, zones[hit].kind, "absorbed", 0)
 
     def passthrough_hits(v: int) -> list[int]:
         cosines = zc @ _unit(pts, v)
@@ -292,9 +322,7 @@ def trace_separatrix(
             absorbed = [h for h in hits if zones[h].kind in absorb_kinds]
             if absorbed:
                 z = zones[absorbed[0]]
-                return TraceOutcome(
-                    direction, cur, z.label, z.kind, "absorbed", len(path) - 1, path
-                )
+                return finish(path, cur, z.label, z.kind, "absorbed", len(zone_exited))
             # Noise-trapped inside a pass-through disk? Tunnel straight through
             # along the incoming great circle and resume beyond it.
             escaped = False
@@ -312,9 +340,7 @@ def trace_separatrix(
                     break
             if escaped:
                 continue
-            return TraceOutcome(
-                direction, cur, None, None, "raw_extremum", len(path) - 1, path
-            )
+            return finish(path, cur, None, None, "raw_extremum", len(zone_exited))
         cur = best_nb
         path.append(cur)
         # Remember where the walk first entered each pass-through zone so the
@@ -324,11 +350,9 @@ def trace_separatrix(
         hit = zone_hit(cur)
         if hit is not None:
             z = zones[hit]
-            return TraceOutcome(
-                direction, cur, z.label, z.kind, "absorbed", len(path) - 1, path
-            )
+            return finish(path, cur, z.label, z.kind, "absorbed", len(zone_exited))
 
-    return TraceOutcome(direction, cur, None, None, "max_steps", len(path) - 1, path)
+    return finish(path, cur, None, None, "max_steps", len(zone_exited))
 
 
 def make_zones(

@@ -36,7 +36,9 @@ class _FakeCluster:
 
 
 class _FakeUnit:
-    def __init__(self, unit_id: str, centroid: tuple[float, float, float], radius: float):
+    def __init__(
+        self, unit_id: str, centroid: tuple[float, float, float], radius: float
+    ):
         self.unit_id = unit_id
         self.centroid = centroid
         self.as_cluster = _FakeCluster(radius)
@@ -46,19 +48,19 @@ def _eff(label: str, kind: str, pos: tuple[float, float, float]) -> dict[str, An
     return {"id_label": label, "type": kind, "position": list(pos)}
 
 
-BASE: dict[str, Any] = dict(
-    maxima=[_cp(1, "maximum", (0.0, 0.0, 1.0))],
-    minima=[_cp(2, "minimum", (0.0, 0.0, -1.0))],
-    saddles=[_cp(3, "saddle", (1.0, 0.0, 0.0))],
-    effective_cps=[],
-    units=[],
-    eff_ring_radius={},
-    hidden_vertex_ids=set(),
-    annihilated_unit_ids=[],
-    center=(0.0, 0.0, 0.0),
-    delta_theta_mesh_rad=math.radians(7.0),
-    k_pitch=2.0,
-)
+BASE: dict[str, Any] = {
+    "maxima": [_cp(1, "maximum", (0.0, 0.0, 1.0))],
+    "minima": [_cp(2, "minimum", (0.0, 0.0, -1.0))],
+    "saddles": [_cp(3, "saddle", (1.0, 0.0, 0.0))],
+    "effective_cps": [],
+    "units": [],
+    "eff_ring_radius": {},
+    "hidden_vertex_ids": set(),
+    "annihilated_unit_ids": [],
+    "center": (0.0, 0.0, 0.0),
+    "delta_theta_mesh_rad": math.radians(7.0),
+    "k_pitch": 2.0,
+}
 
 
 class TestLoneCpRadius:
