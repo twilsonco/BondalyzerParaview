@@ -68,7 +68,12 @@ if workspace_root not in sys.path:
 from BondalyzerParaView.plt_gba_to_vtm import extract_gba_zones_from_plt
 from BondalyzerParaView.trame_viewer import get_display_title, get_robust_scalar_bounds
 from gba_topology2.src.basin_center import (
+    BasinCenter,
     extract_basin_centers,
+)
+from gba_topology2.src.basin_validator import (
+    build_traced_adjacency,
+    validate_all_basin_boundaries,
 )
 from gba_topology2.src.camera_state import (
     CameraState,
@@ -101,6 +106,7 @@ from gba_topology2.src.micro_cluster import (
     compute_micro_clusters,
 )
 from gba_topology2.src.morse_detector import CriticalPoint, compute_discrete_morse_cps
+from gba_topology2.src.morse_smale import trace_zones_from_reduction
 from gba_topology2.src.params_loader import RestorePlan, resolve_restore_plan
 from gba_topology2.src.params_schema import (
     DEFAULT_UI_STATE,
@@ -120,6 +126,11 @@ from gba_topology2.src.polarity_detector import (
     effective_reduction_decision,
 )
 from gba_topology2.src.saddle_launch import SaddleLaunchSeed
+from gba_topology2.src.separatrix_tracer import (
+    TraceOutcome,
+    TraceZone,
+    build_walk_adjacency,
+)
 from gba_topology2.src.sphere_frame import (
     compute_atom_frame,
     radial_offset,
@@ -1009,6 +1020,123 @@ def build_launch_requests(
     return requests
 
 
+@dataclass(frozen=True)
+class TracedComplex:
+    """The traced Morse-Smale complex and its basin-boundary verdict.
+
+    Attributes:
+        zones: Absorption and pass-through caps the walk used.
+        adjacency: ``saddle_id -> {"max": [...], "min": [...]}`` from traced
+            branch endpoints. Saddle-saddle landings appear under ``"sad"``.
+        outcomes: ``saddle_id -> [TraceOutcome]``, one per separatrix branch.
+        validity: ``SimplificationValidity`` over the basin centers.
+        stats: Viewer-shaped counters for the stats grid and info card.
+    """
+
+    zones: list[TraceZone]
+    adjacency: dict[str, dict[str, list[str]]]
+    outcomes: dict[str, list[TraceOutcome]]
+    validity: Any
+    stats: dict[str, Any]
+
+
+def trace_morse_smale_complex(
+    *,
+    seeds: list[SaddleLaunchSeed],
+    pts: npt.NDArray[np.float64],
+    triangles: npt.NDArray[np.integer[Any]],
+    f_vals: npt.NDArray[np.float64],
+    maxima: list[CriticalPoint],
+    minima: list[CriticalPoint],
+    saddles: list[CriticalPoint],
+    effective_cps: list[dict[str, Any]],
+    units: list[ReductionUnit],
+    eff_ring_radius: dict[str, float],
+    hidden_vertex_ids: set[int],
+    annihilated_unit_ids: set[str],
+    basin_centers: list[BasinCenter],
+    center: tuple[float, float, float],
+    delta_theta_mesh_rad: float,
+    k_pitch: float,
+) -> TracedComplex:
+    """Trace every visible saddle's separatrices and validate the basin rims.
+
+    The trace is the cluster-aware gradient walk from ``separatrix_tracer``:
+    whole clusters absorb as one effective CP, and annihilated (chi = 0)
+    clusters are passed through, so a branch is never terminated by a spurious
+    extremum the reduction already proved is not a critical point.
+
+    Shared by the viewer and the headless harness, which is why every input is
+    a plain argument rather than a context object.
+
+    Args:
+        seeds: Converged launch seeds, one per visible saddle.
+        pts: (N, 3) centred-frame mesh vertices.
+        triangles: (M, 3) triangle vertex indices.
+        f_vals: (N,) analysed field values.
+        maxima: Raw maxima (centred frame).
+        minima: Raw minima (centred frame).
+        saddles: Raw saddles (centred frame).
+        effective_cps: Effective CP UI dicts (world-frame positions).
+        units: All reduction units; annihilated ones supply pass-through caps.
+        eff_ring_radius: Excision radius per effective CP, keyed by ``id_label``.
+        hidden_vertex_ids: Raw vertices collapsed into an effective entity.
+        annihilated_unit_ids: Units reduced to nothing (net index 0).
+        basin_centers: Visible extrema, used for rim validation.
+        center: World-frame nucleus.
+        delta_theta_mesh_rad: Intrinsic angular mesh pitch.
+        k_pitch: Micro-clustering pitch multiplier, which sets the lone-CP cap.
+
+    Returns:
+        TracedComplex with zones, adjacency, per-branch outcomes, the basin
+        validity verdict, and viewer-shaped stats.
+    """
+    zones = trace_zones_from_reduction(
+        maxima=maxima,
+        minima=minima,
+        saddles=saddles,
+        effective_cps=effective_cps,
+        units=units,
+        eff_ring_radius=eff_ring_radius,
+        hidden_vertex_ids=hidden_vertex_ids,
+        annihilated_unit_ids=annihilated_unit_ids,
+        center=center,
+        delta_theta_mesh_rad=delta_theta_mesh_rad,
+        k_pitch=k_pitch,
+    )
+    neighbors = build_walk_adjacency(triangles, int(pts.shape[0]))
+    adjacency, outcomes = build_traced_adjacency(seeds, pts, f_vals, neighbors, zones)
+    validity = validate_all_basin_boundaries(basin_centers, adjacency)
+
+    branches = [o for lst in outcomes.values() for o in lst]
+    stats = {
+        "n_saddles_traced": len(seeds),
+        "n_branches": len(branches),
+        "n_absorbed": sum(1 for o in branches if o.status == "absorbed"),
+        "n_raw_extremum": sum(1 for o in branches if o.status == "raw_extremum"),
+        "n_unresolved": sum(
+            1 for o in branches if o.status in ("stalled", "max_steps")
+        ),
+        "n_saddle_saddle_edges": sum(
+            len(entry.get("sad", [])) for entry in adjacency.values()
+        ),
+        "n_tunnels": sum(o.tunnel_count for o in branches),
+        "is_valid": validity.is_valid,
+        "n_max_valid": validity.n_max_valid,
+        "n_max_total": validity.n_max_total,
+        "n_min_valid": validity.n_min_valid,
+        "n_min_total": validity.n_min_total,
+        "summary": validity.summary,
+    }
+    return TracedComplex(
+        zones=zones,
+        adjacency=adjacency,
+        outcomes=outcomes,
+        validity=validity,
+        stats=stats,
+    )
+
+
 @dataclass
 class ViewerSession:
     """The mesh-bound state of the viewer for one atom of one file.
@@ -1635,6 +1763,7 @@ def run_sphere_viewer(
     state.catastrophes_list = []
     state.basin_centers_list = []
     state.launch_stats = summarize_outcomes([])
+    state.separatrix_stats = {}
     state.selected_cp = None
     state.selected_cluster = None
     state.selected_catastrophe = None
@@ -1657,6 +1786,14 @@ def run_sphere_viewer(
     runtime_hidden_vertex_ids: set[int] = set()
     runtime_annulled_cluster_ids: set[str] = set()
     runtime_irreducible_cluster_ids: set[str] = set()
+    # Traced Morse-Smale complex (Basin Locator Step 3). Populated only while
+    # show_separatrices is on: the trace walks every visible saddle's
+    # separatrix branches across the mesh, which costs ~1-2 s per topology
+    # update on a 20K vertex mesh.
+    runtime_trace_zones: list[TraceZone] = []
+    runtime_traced_adjacency: dict[str, dict[str, list[str]]] = {}
+    runtime_trace_outcomes: dict[str, list[TraceOutcome]] = {}
+    runtime_basin_validity: Any = None
 
     # Re-entrancy latch for bulk state writes (see reset_defaults). Trame fires a
     # @state.change callback per changed key, so a 19-key batched reset would
@@ -2367,6 +2504,43 @@ def run_sphere_viewer(
 
         state.launch_stats = launch_summary
 
+        # 10. Trace the Morse-Smale complex and validate basin rims.
+        # Gated on the toggle: the walk costs ~1-2 s per topology update on a
+        # 20K vertex mesh, and an operator dragging k_pitch does not need the
+        # rims recomputed on every step.
+        nonlocal runtime_trace_zones, runtime_traced_adjacency
+        nonlocal runtime_trace_outcomes, runtime_basin_validity
+        if bool(state.show_separatrices):
+            traced = trace_morse_smale_complex(
+                seeds=seeds,
+                pts=session.pts_np,
+                triangles=session.triangles_np,
+                f_vals=f_vals_np,
+                maxima=morse_res.maxima,
+                minima=morse_res.minima,
+                saddles=morse_res.saddles,
+                effective_cps=effective_cps_ui,
+                units=units,
+                eff_ring_radius=eff_ring_radius,
+                hidden_vertex_ids=hidden_vertex_ids,
+                annihilated_unit_ids=annihilated_unit_ids,
+                basin_centers=basin_centers,
+                center=session.center,
+                delta_theta_mesh_rad=session.delta_theta_rad,
+                k_pitch=float(state.k_pitch),
+            )
+            runtime_trace_zones = traced.zones
+            runtime_traced_adjacency = traced.adjacency
+            runtime_trace_outcomes = traced.outcomes
+            runtime_basin_validity = traced.validity
+            state.separatrix_stats = traced.stats
+        else:
+            runtime_trace_zones = []
+            runtime_traced_adjacency = {}
+            runtime_trace_outcomes = {}
+            runtime_basin_validity = None
+            state.separatrix_stats = {}
+
         n_raw_hidden = len(hidden_vertex_ids)
         state.display_counts = {
             "minima": n_disp_min,
@@ -2674,6 +2848,7 @@ def run_sphere_viewer(
         "perfect_port_angles",
         "nudge_max_pitch",
         "show_launch_seeds",
+        "show_separatrices",
     )
     def on_param_change(**kwargs: Any) -> None:
         if suppress_param_change:

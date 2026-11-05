@@ -9,6 +9,7 @@ annihilated clusters.
 
 from __future__ import annotations
 
+import json
 import math
 import os
 from typing import Any
@@ -252,3 +253,101 @@ class TestHarnessAdapterAgreement:
                 assert z.label in seed_ids
             else:
                 assert z.label in extrema_ids
+
+
+@pytest.mark.skipif(
+    not os.path.exists(ETHENE_PARAMS_JSON),
+    reason="ethene4_atom1_params.json not present",
+)
+class TestViewerTraceEntryAgreement:
+    """The viewer's trace entry point must match the harness step for step.
+
+    ``trace_morse_smale_complex`` is the seam both sides call; this pins that
+    feeding it the harness's own pipeline output reproduces the harness's
+    adjacency, outcomes and verdict exactly, so an on-screen trace is the trace
+    a saved snapshot reproduces headlessly.
+    """
+
+    @staticmethod
+    def _pipeline() -> tuple[Any, Any]:
+        from gba_topology2.diagnose_params import build_context, run_stages
+        from gba_topology2.src.sphere_viewer import load_params_from_dict
+
+        payload = load_snapshot(ETHENE_PARAMS_JSON)
+        params = load_params_from_dict(payload)
+        ctx = build_context(params, plt_path=None, atom_num=None, field_name=None)
+        run_stages(ctx)
+        return ctx, params
+
+    @classmethod
+    def _trace(cls) -> tuple[Any, Any]:
+        """Run the pipeline, then the shared viewer entry point over its output."""
+        from gba_topology2.src.sphere_viewer import trace_morse_smale_complex
+
+        ctx, params = cls._pipeline()
+        traced = trace_morse_smale_complex(
+            seeds=ctx.seeds,
+            pts=ctx.pts,
+            triangles=ctx.triangles,
+            f_vals=ctx.f_vals,
+            maxima=ctx.require_morse().maxima,
+            minima=ctx.require_morse().minima,
+            saddles=ctx.require_morse().saddles,
+            effective_cps=ctx.effective_cps,
+            units=ctx.units,
+            eff_ring_radius=ctx.eff_ring_radius,
+            hidden_vertex_ids=ctx.hidden_vertex_ids,
+            annihilated_unit_ids=ctx.annihilated_units,
+            basin_centers=ctx.basin_centers,
+            center=ctx.center,
+            delta_theta_mesh_rad=ctx.delta_theta_rad,
+            k_pitch=float(params["k_pitch"]),
+        )
+        return ctx, traced
+
+    def test_adjacency_and_verdict_match_harness(self) -> None:
+        """The shared entry point reproduces the harness step for step."""
+        from gba_topology2.diagnose_params import (
+            build_trace_zones,
+            stage_validate,
+        )
+        from gba_topology2.src.basin_validator import build_traced_adjacency
+        from gba_topology2.src.separatrix_tracer import build_walk_adjacency
+
+        ctx, traced = self._trace()
+        harness = stage_validate(ctx)
+
+        # The harness path, computed independently of the shared entry point.
+        nbrs = build_walk_adjacency(ctx.triangles, int(ctx.pts.shape[0]))
+        harness_adj, _ = build_traced_adjacency(
+            ctx.seeds, ctx.pts, ctx.f_vals, nbrs, build_trace_zones(ctx)
+        )
+
+        assert traced.adjacency == harness_adj
+        assert traced.stats["n_branches"] == harness["n_branches"]
+        assert traced.stats["n_absorbed"] == harness["n_branches_absorbed"]
+        assert traced.stats["is_valid"] == harness["is_valid"]
+        assert (
+            f"{traced.stats['n_max_valid']}/{traced.stats['n_max_total']}"
+            == harness["n_max_valid"]
+        )
+        assert (
+            f"{traced.stats['n_min_valid']}/{traced.stats['n_min_total']}"
+            == harness["n_min_valid"]
+        )
+        assert traced.stats["summary"] == harness["summary"]
+
+    def test_zone_count_matches_adapter(self) -> None:
+        from gba_topology2.diagnose_params import build_trace_zones
+
+        ctx, traced = self._trace()
+        assert [(z.label, z.kind) for z in traced.zones] == [
+            (z.label, z.kind) for z in build_trace_zones(ctx)
+        ]
+
+    def test_stats_shape_is_json_serialisable(self) -> None:
+        """The stats dict is bound into the Vue template, so it must be plain."""
+        ctx, traced = self._trace()
+        json.dumps(traced.stats)  # must not raise
+        assert traced.stats["n_saddles_traced"] == len(ctx.seeds)
+        assert traced.stats["n_saddles_traced"] == len(ctx.seeds)
