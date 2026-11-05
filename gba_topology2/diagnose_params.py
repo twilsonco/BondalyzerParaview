@@ -78,6 +78,7 @@ from gba_topology2.src.morse_detector import (
     compute_discrete_morse_cps,
 )
 from gba_topology2.src.morse_smale import trace_zones_from_reduction
+from gba_topology2.src.params_schema import migrate_params_payload
 from gba_topology2.src.point_locator import make_kdtree_nearest_finder
 from gba_topology2.src.polarity_detector import (
     classify_cluster_polarity,
@@ -1165,7 +1166,11 @@ def main() -> int:
 
     with open(args.params_json, encoding="utf-8") as fh:
         payload = json.load(fh)
-    params = load_params_from_dict(payload)
+    # Snapshots are operator observations and are never rewritten, so a file
+    # saved before a control existed is migrated (added controls take their
+    # defaults) rather than rejected. The viewer keeps the strict gate: an
+    # interactive session must not silently restore a stale file.
+    params = load_params_from_dict(migrate_params_payload(payload))
     apply_overrides(params, args.overrides)
 
     ctx = build_context(

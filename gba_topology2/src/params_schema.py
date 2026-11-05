@@ -53,6 +53,7 @@ __all__ = [
     "PARAM_STRING_KEYS",
     "default_params_path",
     "load_params_from_dict",
+    "migrate_params_payload",
     "save_params_to_dict",
 ]
 
@@ -355,6 +356,64 @@ def save_params_to_dict(
                 "A camera snapshot requires the nucleus it was captured around"
             )
         payload[PARAM_CAMERA_SECTION] = camera_section_to_dict(camera, camera_center)
+    return payload
+
+
+def migrate_params_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Fill controls added since a snapshot was captured, from their defaults.
+
+    ``load_params_from_dict`` rejects a stale ``schema_version`` on purpose: an
+    interactive session must not silently restore a file whose controls it does
+    not fully understand. Headless reproduction has no such ambiguity -- a
+    control that did not exist when the file was written has exactly one
+    sensible value for it, its default -- so the harness migrates first and
+    then loads, which keeps every snapshot an operator has ever saved
+    reproducible across schema bumps.
+
+    Controls retired since capture are dropped, mirroring the loader's
+    indifference to unknown keys (retiring is not a breaking change, which is
+    why Entry 037's removals did not bump the version).
+
+    Args:
+        payload: Dict loaded from a file written by ``save_params_to_dict``.
+            Modified in place and returned.
+
+    Returns:
+        The same payload, with ``schema_version`` set to the current version
+        and every current control present in its section.
+
+    Raises:
+        TypeError: If a known control carries a value of the wrong widget type
+            (genuine corruption, not a version gap).
+    """
+    params = payload.setdefault("params", {})
+
+    def _matches(value: Any, section: str) -> bool:
+        # isinstance(True, int) is True in Python, so the float section must
+        # exclude bools explicitly or every switch is copied into it.
+        if section == "bools":
+            return isinstance(value, bool)
+        if section == "floats":
+            return isinstance(value, (int, float)) and not isinstance(value, bool)
+        return isinstance(value, str)
+
+    def _known(key: str) -> bool:
+        # selected_field is a context string, not a DEFAULT_UI_STATE control:
+        # its default is data-dependent and supplied at runtime.
+        return key in DEFAULT_UI_STATE or key in PARAM_CONTEXT_STRING_KEYS
+
+    for section in ("bools", "floats", "strings"):
+        values = params.setdefault(section, {})
+        for key, value in list(values.items()):
+            if not _known(key):
+                del values[key]
+            elif not _matches(value, section):
+                raise TypeError(f"Control '{key}' is not a {section[:-1]}: {value!r}")
+        for key, default in DEFAULT_UI_STATE.items():
+            if _matches(default, section) and key not in values:
+                values[key] = default
+
+    payload["schema_version"] = PARAMS_SCHEMA_VERSION
     return payload
 
 

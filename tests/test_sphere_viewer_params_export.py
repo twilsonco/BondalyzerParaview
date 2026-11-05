@@ -23,6 +23,7 @@ import pytest
 from snapshot_params import load_snapshot
 
 import gba_topology2.src.sphere_viewer as sv
+from gba_topology2.src.params_schema import migrate_params_payload
 from gba_topology2.src.sphere_viewer import (
     DEFAULT_UI_STATE,
     PARAMS_SCHEMA_VERSION,
@@ -406,3 +407,45 @@ def test_snapshot_migration_does_not_leak_switches_into_floats(
     migrated = load_snapshot(str(path))
     assert set(migrated["params"]["floats"]) == set(sv.PARAM_FLOAT_KEYS)
     assert all(not isinstance(v, bool) for v in migrated["params"]["floats"].values())
+
+
+class TestMigrateParamsPayload:
+    """migrate_params_payload(): the harness path for pre-bump snapshots."""
+
+    def test_added_control_fills_with_default(self) -> None:
+        payload = _export()
+        del payload["params"]["bools"]["show_separatrices"]
+        payload["schema_version"] = 2
+        migrated = migrate_params_payload(payload)
+        assert migrated["schema_version"] == PARAMS_SCHEMA_VERSION
+        assert migrated["params"]["bools"]["show_separatrices"] is False
+        assert load_params_from_dict(migrated)["show_separatrices"] is False
+
+    def test_retired_control_is_dropped(self) -> None:
+        payload = _export()
+        payload["params"]["floats"]["launch_seed_pitch"] = 2.0
+        migrated = migrate_params_payload(payload)
+        assert "launch_seed_pitch" not in migrated["params"]["floats"]
+        load_params_from_dict(migrated)  # must not raise
+
+    def test_type_corruption_still_raises(self) -> None:
+        payload = _export()
+        payload["params"]["floats"]["k_pitch"] = "wide"
+        with pytest.raises(TypeError, match="k_pitch"):
+            migrate_params_payload(payload)
+
+    def test_bools_do_not_leak_into_floats(self) -> None:
+        """isinstance(True, int) is True; the float fill must exclude bools."""
+        payload = _export()
+        payload["params"]["floats"] = {}
+        migrated = migrate_params_payload(payload)
+        assert set(migrated["params"]["floats"]) == set(sv.PARAM_FLOAT_KEYS)
+        assert all(
+            not isinstance(v, bool) for v in migrated["params"]["floats"].values()
+        )
+
+    def test_migration_is_idempotent(self) -> None:
+        payload = _export()
+        once = migrate_params_payload(dict(payload))
+        twice = migrate_params_payload(dict(once))
+        assert once == twice
