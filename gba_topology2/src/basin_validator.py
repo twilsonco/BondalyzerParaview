@@ -53,6 +53,7 @@ __all__ = [
     "build_traced_adjacency",
     "is_valid_max_basin_boundary",
     "is_valid_min_basin_boundary",
+    "order_boundary_cycle",
     "validate_all_basin_boundaries",
     "validate_max_basin_boundary",
     "validate_min_basin_boundary",
@@ -402,6 +403,92 @@ def build_traced_adjacency(
 # ---------------------------------------------------------------------------
 # Per-basin boundary validation
 # ---------------------------------------------------------------------------
+
+
+def order_boundary_cycle(
+    basin_id: str,
+    saddle_adj: SaddleAdjacency,
+) -> list[str]:
+    """Walk a basin's boundary and return the alternating id sequence.
+
+    The rim of a maximum basin alternates saddle, minimum, saddle, minimum ...
+    and dually for a minimum basin. The walk follows the bipartite boundary
+    graph: from a saddle take the extremum on the other side of it, from an
+    extremum take the saddle other than the one you arrived on.
+
+    Best-effort: when the boundary is not a single cycle (a degree-1 extremum,
+    a split rim) the walk stops where it must and returns the partial order,
+    so the caller can render and explain the defect instead of getting nothing.
+
+    Args:
+        basin_id: Basin center id.
+        saddle_adj: Morse-Smale adjacency from ``build_traced_adjacency``.
+
+    Returns:
+        Ids alternating saddle / opposite-polarity extremum, starting with a
+        saddle. Empty when the basin has no adjacent saddles.
+    """
+    is_max = basin_id.startswith(("MAX_", "E-MAX")) or (
+        not basin_id.startswith(("MIN_", "E-MIN"))
+        and any(basin_id in v.get("max", []) for v in saddle_adj.values())
+    )
+    # Two different keys: the basin is an endpoint of its boundary saddles'
+    # ascent (max basin) or descent (min basin) branches, while the rim
+    # extrema are the OTHER endpoints of those same saddles.
+    saddle_key = "max" if is_max else "min"
+    extremum_key = "min" if is_max else "max"
+    boundary_saddles = [
+        sid for sid, v in saddle_adj.items() if basin_id in v.get(saddle_key, [])
+    ]
+    if not boundary_saddles:
+        return []
+
+    # extremum -> the boundary saddles it touches (each should be exactly 2).
+    ext_to_saddles: dict[str, list[str]] = {}
+    for sid in boundary_saddles:
+        for eid in saddle_adj.get(sid, {}).get(extremum_key, []):
+            if eid == basin_id:
+                continue  # the basin center itself is not part of its own rim
+            ext_to_saddles.setdefault(eid, []).append(sid)
+
+    if not ext_to_saddles:
+        return [boundary_saddles[0]]
+
+    start_ext = next(iter(ext_to_saddles))
+    start_saddle = ext_to_saddles[start_ext][0]
+
+    ordered: list[str] = []
+    seen_saddles: set[str] = set()
+    cur_ext, cur_sad = start_ext, start_saddle
+
+    for _ in range(2 * len(boundary_saddles) + 2):
+        if cur_sad in seen_saddles:
+            break
+        seen_saddles.add(cur_sad)
+        ordered.append(cur_sad)
+
+        ext_neighbors = [
+            e
+            for e in saddle_adj.get(cur_sad, {}).get(extremum_key, [])
+            if e != basin_id
+        ]
+        if not ext_neighbors:
+            break
+        nxt_ext = (
+            ext_neighbors[0]
+            if ext_neighbors[0] != cur_ext
+            else (ext_neighbors[1] if len(ext_neighbors) > 1 else ext_neighbors[0])
+        )
+        ordered.append(nxt_ext)
+        if nxt_ext == start_ext:
+            break  # rim closed
+
+        sad_neighbors = [s for s in ext_to_saddles.get(nxt_ext, []) if s != cur_sad]
+        if not sad_neighbors:
+            break
+        cur_ext, cur_sad = nxt_ext, sad_neighbors[0]
+
+    return ordered
 
 
 def _validate_boundary_cycle(

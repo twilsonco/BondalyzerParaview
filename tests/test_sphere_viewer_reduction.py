@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 import pathlib
 import re
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -558,3 +558,112 @@ def test_raw_saddles_precede_effective_ones() -> None:
         k_pitch=2.0,
     )
     assert [r.saddle_id for r in reqs] == ["SAD_7", "E-SAD_CAT_1"]
+
+
+class TestSeparatrixFocusIds:
+    """separatrix_focus_ids(): which saddles the selection asks to draw."""
+
+    ADJ: ClassVar[dict[str, dict[str, list[str]]]] = {
+        "SAD_1": {"max": ["MAX_A", "MAX_B"], "min": ["MIN_1", "MIN_2"]},
+        "SAD_2": {"max": ["MAX_A", "MAX_B"], "min": ["MIN_2", "MIN_3"]},
+        "SAD_3": {"max": ["MAX_A", "MAX_B"], "min": ["MIN_3", "MIN_1"]},
+        "E-SAD_MC9": {"max": ["MAX_B", "MAX_C"], "min": ["MIN_1", "MIN_2"]},
+    }
+    TRACED: ClassVar[set[str]] = set(ADJ)
+
+    def _focus(
+        self,
+        cp: dict[str, Any] | None = None,
+        basin: dict[str, Any] | None = None,
+    ) -> set[str] | None:
+        return sv.separatrix_focus_ids(
+            selected_cp=cp,
+            selected_basin_center=basin,
+            adjacency=dict(self.ADJ),
+            traced_saddle_ids=set(self.TRACED),
+        )
+
+    def test_no_selection_draws_everything(self) -> None:
+        assert self._focus() is None
+
+    def test_saddle_selection_focuses_on_itself(self) -> None:
+        assert self._focus(cp={"id_label": "SAD_2"}) == {"SAD_2"}
+
+    def test_effective_saddle_selection_focuses_on_itself(self) -> None:
+        assert self._focus(cp={"id_label": "E-SAD_MC9"}) == {"E-SAD_MC9"}
+
+    def test_extremum_selection_is_not_a_saddle_focus(self) -> None:
+        """A max/min click focuses on the rim, not on itself as a saddle."""
+        assert self._focus(cp={"id_label": "MAX_A"}) is None
+
+    def test_untraced_saddle_falls_through(self) -> None:
+        assert self._focus(cp={"id_label": "SAD_999"}) is None
+
+    def test_basin_selection_returns_its_rim_saddles(self) -> None:
+        assert self._focus(basin={"id": "MAX_A"}) == {"SAD_1", "SAD_2", "SAD_3"}
+
+    def test_effective_saddle_participates_in_a_rim(self) -> None:
+        """A collapsed saddle is a rim member like any raw one."""
+        adj = {
+            "SAD_1": {"max": ["E-MAX_MC28"], "min": ["MIN_1", "MIN_2"]},
+            "E-SAD_MC9": {"max": ["E-MAX_MC28"], "min": ["MIN_2", "MIN_1"]},
+        }
+        focus = sv.separatrix_focus_ids(
+            selected_cp=None,
+            selected_basin_center={"id": "E-MAX_MC28"},
+            adjacency=adj,
+            traced_saddle_ids=set(adj),
+        )
+        assert focus == {"SAD_1", "E-SAD_MC9"}
+
+    def test_defective_rim_focuses_on_the_partial_loop(self) -> None:
+        """A degree-3 extremum means no single closed rim; draw what is reachable.
+
+        The focus is a subset of the adjacent saddles rather than all of them,
+        which is the honest rendering of a rim the validator rejects.
+        """
+        adj = {
+            "SAD_1": {"max": ["MAX_A"], "min": ["MIN_1", "MIN_2"]},
+            "SAD_2": {"max": ["MAX_A"], "min": ["MIN_2", "MIN_1"]},
+            "SAD_3": {"max": ["MAX_A"], "min": ["MIN_1", "MIN_3"]},
+        }
+        focus = sv.separatrix_focus_ids(
+            selected_cp=None,
+            selected_basin_center={"id": "MAX_A"},
+            adjacency=adj,
+            traced_saddle_ids=set(adj),
+        )
+        assert focus is not None
+        assert focus < set(adj)
+
+    def test_min_basin_selection_returns_its_rim_saddles(self) -> None:
+        focus = self._focus(basin={"id": "MIN_2"})
+        assert focus is not None
+        assert focus <= self.TRACED
+        # Every returned saddle really touches MIN_2.
+        for sid in focus:
+            assert "MIN_2" in self.ADJ[sid]["min"]
+
+    def test_cluster_selection_is_ignored(self) -> None:
+        assert self._focus(cp={"id_label": "MC12"}) is None
+
+    def test_empty_adjacency_draws_everything(self) -> None:
+        assert (
+            sv.separatrix_focus_ids(
+                selected_cp=None,
+                selected_basin_center={"id": "MAX_A"},
+                adjacency={},
+                traced_saddle_ids=set(),
+            )
+            is None
+        )
+
+    def test_rim_saddles_absent_from_trace_are_dropped(self) -> None:
+        """A rim saddle with no traced outcomes must not be requested."""
+        focus = sv.separatrix_focus_ids(
+            selected_cp=None,
+            selected_basin_center={"id": "MAX_A"},
+            adjacency=dict(self.ADJ),
+            traced_saddle_ids={"SAD_1"},
+        )
+        assert focus == {"SAD_1"}

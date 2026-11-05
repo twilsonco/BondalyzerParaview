@@ -59,11 +59,14 @@ import numpy as np
 import numpy.typing as npt
 
 __all__ = [
+    "RENDER_GROUPS",
     "TraceOutcome",
     "TraceZone",
     "ZoneKind",
     "build_walk_adjacency",
+    "build_walk_adjacency_from_edges",
     "make_zones",
+    "render_groups_from_outcomes",
     "trace_separatrix",
 ]
 
@@ -457,3 +460,67 @@ def build_walk_adjacency_from_edges(
         adj[a].add(b)
         adj[b].add(a)
     return [sorted(s) for s in adj]
+
+
+RENDER_GROUPS: tuple[str, ...] = (
+    "ascent",
+    "descent",
+    "saddle_saddle",
+    "low_confidence",
+)
+
+
+def render_groups_from_outcomes(
+    outcomes: dict[str, list[TraceOutcome]],
+    pts: npt.NDArray[np.float64],
+    saddle_positions: dict[str, tuple[float, float, float]],
+    focus_saddle_ids: set[str] | None = None,
+) -> dict[str, list[list[tuple[float, float, float]]]]:
+    """Group traced paths into the polylines the viewer draws.
+
+    Four groups, so the operator can read the structure at a glance:
+    ``ascent`` (ridge, towards maxima), ``descent`` (valley, towards minima),
+    ``saddle_saddle`` (a separatrix between two saddles -- a corridor, which the
+    rim validator does not consume yet and must not look like a basin edge),
+    and ``low_confidence`` (every branch the walk did not absorb: one that
+    ended on a raw extremum, stalled, or ran out of steps, so its target is a
+    guess at best).
+
+    Each polyline starts at the saddle centre, so a branch reads as leaving the
+    saddle it belongs to.
+
+    Args:
+        outcomes: ``saddle_id -> [TraceOutcome]`` from ``build_traced_adjacency``.
+        pts: (N, 3) centred-frame vertices the paths index.
+        saddle_positions: ``saddle_id -> position`` for the branch prefixes.
+        focus_saddle_ids: When given, only these saddles' branches are emitted
+            (the selection-driven focus view). None draws everything.
+
+    Returns:
+        Group name -> list of polylines, each a list of centred-frame points.
+    """
+    groups: dict[str, list[list[tuple[float, float, float]]]] = {
+        name: [] for name in RENDER_GROUPS
+    }
+    for saddle_id, branch_list in outcomes.items():
+        if focus_saddle_ids is not None and saddle_id not in focus_saddle_ids:
+            continue
+        origin = saddle_positions.get(saddle_id)
+        for out in branch_list:
+            if out.target_kind == "absorb_sad":
+                group = "saddle_saddle"
+            elif out.status != "absorbed":
+                group = "low_confidence"
+            elif out.direction == "ascent":
+                group = "ascent"
+            else:
+                group = "descent"
+            line: list[tuple[float, float, float]] = []
+            if origin is not None:
+                line.append((float(origin[0]), float(origin[1]), float(origin[2])))
+            line.extend(
+                (float(pts[v][0]), float(pts[v][1]), float(pts[v][2])) for v in out.path
+            )
+            if len(line) >= 2:
+                groups[group].append(line)
+    return groups

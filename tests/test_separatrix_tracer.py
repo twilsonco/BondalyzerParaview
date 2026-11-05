@@ -10,15 +10,19 @@ from __future__ import annotations
 
 import math
 from itertools import pairwise
+from typing import ClassVar
 
 import numpy as np
 import pytest
 
 from gba_topology2.src.separatrix_tracer import (
+    RENDER_GROUPS,
+    TraceOutcome,
     TraceZone,
     build_walk_adjacency,
     build_walk_adjacency_from_edges,
     make_zones,
+    render_groups_from_outcomes,
     trace_separatrix,
 )
 
@@ -433,3 +437,109 @@ class TestOutcomeMetrics:
         out = trace_separatrix(start, "descent", PTS, f, NBR, zones, max_steps=4096)
         assert out.tunnel_count >= 1
         assert out.target_label == "MIN_S"
+
+
+def _outcome(
+    direction: str,
+    path: list[int],
+    target_kind: str | None = None,
+    status: str = "absorbed",
+    target_label: str | None = None,
+) -> TraceOutcome:
+    return TraceOutcome(
+        direction=direction,
+        start_vertex=path[-1],
+        target_label=target_label,
+        target_kind=target_kind,
+        status=status,
+        n_steps=max(len(path) - 1, 0),
+        path=path,
+    )
+
+
+class TestRenderGroups:
+    """render_groups_from_outcomes(): the four visual classes the viewer draws."""
+
+    POS: ClassVar[dict[str, tuple[float, float, float]]] = {
+        "S1": (1.0, 0.0, 0.0),
+        "S2": (0.0, 1.0, 0.0),
+    }
+
+    def test_ascent_and_descent_are_separate_groups(self) -> None:
+        outcomes = {
+            "S1": [
+                _outcome("ascent", [1, 2, 3], "absorb_max", target_label="MAX_9"),
+                _outcome("descent", [1, 4], "absorb_min", target_label="MIN_8"),
+            ]
+        }
+        groups = render_groups_from_outcomes(outcomes, PTS, self.POS)
+        assert len(groups["ascent"]) == 1
+        assert len(groups["descent"]) == 1
+        assert groups["saddle_saddle"] == []
+        assert groups["low_confidence"] == []
+
+    def test_saddle_saddle_lands_in_its_own_group(self) -> None:
+        """A corridor separatrix must not look like a basin edge."""
+        outcomes = {
+            "S1": [_outcome("ascent", [1, 2], "absorb_sad", target_label="SAD_7")]
+        }
+        groups = render_groups_from_outcomes(outcomes, PTS, self.POS)
+        assert len(groups["saddle_saddle"]) == 1
+        assert groups["ascent"] == []
+
+    def test_low_confidence_beats_direction(self) -> None:
+        """An unabsorbed ascent is a guess, so it renders as low confidence."""
+        outcomes = {"S1": [_outcome("ascent", [1, 2], None, "raw_extremum")]}
+        groups = render_groups_from_outcomes(outcomes, PTS, self.POS)
+        assert len(groups["low_confidence"]) == 1
+        assert groups["ascent"] == []
+
+    def test_stalled_and_max_steps_are_low_confidence(self) -> None:
+        outcomes = {
+            "S1": [
+                _outcome("descent", [1, 2], None, "stalled"),
+                _outcome("ascent", [1, 3], None, "max_steps"),
+            ]
+        }
+        groups = render_groups_from_outcomes(outcomes, PTS, self.POS)
+        assert len(groups["low_confidence"]) == 2
+
+    def test_polyline_is_prefixed_with_the_saddle_centre(self) -> None:
+        outcomes = {"S1": [_outcome("ascent", [5, 6, 7], "absorb_max")]}
+        groups = render_groups_from_outcomes(outcomes, PTS, self.POS)
+        line = groups["ascent"][0]
+        assert line[0] == pytest.approx(self.POS["S1"])
+        assert len(line) == 4  # saddle + 3 path vertices
+
+    def test_missing_saddle_position_still_draws_the_path(self) -> None:
+        outcomes = {"S_UNKNOWN": [_outcome("ascent", [5, 6], "absorb_max")]}
+        groups = render_groups_from_outcomes(outcomes, PTS, self.POS)
+        assert len(groups["ascent"][0]) == 2
+
+    def test_focus_filter_restricts_to_selected_saddles(self) -> None:
+        outcomes = {
+            "S1": [_outcome("ascent", [1, 2], "absorb_max")],
+            "S2": [_outcome("descent", [3, 4], "absorb_min")],
+        }
+        groups = render_groups_from_outcomes(outcomes, PTS, self.POS, {"S1"})
+        assert len(groups["ascent"]) == 1
+        assert groups["descent"] == []
+
+    def test_focus_none_draws_everything(self) -> None:
+        outcomes = {
+            "S1": [_outcome("ascent", [1, 2], "absorb_max")],
+            "S2": [_outcome("descent", [3, 4], "absorb_min")],
+        }
+        groups = render_groups_from_outcomes(outcomes, PTS, self.POS, None)
+        assert len(groups["ascent"]) == 1
+        assert len(groups["descent"]) == 1
+
+    def test_single_vertex_paths_are_dropped(self) -> None:
+        """A degenerate one-point path draws nothing; a polyline needs 2."""
+        outcomes = {"S1": [_outcome("ascent", [4], "absorb_max")]}
+        groups = render_groups_from_outcomes(outcomes, PTS, {})
+        assert groups["ascent"] == []
+
+    def test_every_group_key_is_present_even_when_empty(self) -> None:
+        groups = render_groups_from_outcomes({}, PTS, {})
+        assert set(groups) == set(RENDER_GROUPS)

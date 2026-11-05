@@ -24,6 +24,7 @@ from gba_topology2.src.basin_validator import (
     build_traced_adjacency,
     is_valid_max_basin_boundary,
     is_valid_min_basin_boundary,
+    order_boundary_cycle,
     validate_all_basin_boundaries,
     validate_max_basin_boundary,
     validate_min_basin_boundary,
@@ -606,3 +607,85 @@ class TestPd20kNoiseHandling:
         # is the one that carries zone semantics, and that both agree on ids.
         for entry in adj.values():
             assert not (set(entry["max"]) | set(entry["min"])) & annul
+
+
+class TestOrderBoundaryCycle:
+    """order_boundary_cycle(): the alternating rim sequence the viewer draws."""
+
+    def test_triangle_rim_alternates_and_closes(self) -> None:
+        adj = _make_adj(
+            {
+                "S1": (["MAX_A", "X"], ["MIN_1", "MIN_2"]),
+                "S2": (["MAX_A", "X"], ["MIN_2", "MIN_3"]),
+                "S3": (["MAX_A", "X"], ["MIN_3", "MIN_1"]),
+            }
+        )
+        seq = order_boundary_cycle("MAX_A", adj)
+        assert len(seq) == 6
+        assert seq[0].startswith("S")
+        # Strict alternation of saddle / minimum, and the rim closes on itself.
+        for i, item in enumerate(seq):
+            is_saddle = item.startswith("S")
+            assert is_saddle == (i % 2 == 0)
+        assert seq[-1] in adj[seq[0]]["min"]
+
+    def test_basin_center_excluded_from_its_own_rim(self) -> None:
+        adj = _make_adj(
+            {
+                "S1": (["MAX_A", "MAX_A"], ["MIN_1", "MIN_2"]),
+                "S2": (["MAX_A", "MAX_A"], ["MIN_2", "MIN_1"]),
+            }
+        )
+        seq = order_boundary_cycle("MAX_A", adj)
+        assert "MAX_A" not in seq
+
+    def test_min_basin_rim_lists_maxima(self) -> None:
+        adj = _make_adj(
+            {
+                "S1": (["MAX_1", "MAX_2"], ["MIN_A", "X"]),
+                "S2": (["MAX_2", "MAX_3"], ["MIN_A", "X"]),
+                "S3": (["MAX_3", "MAX_1"], ["MIN_A", "X"]),
+            }
+        )
+        seq = order_boundary_cycle("MIN_A", adj)
+        assert len(seq) == 6
+        assert set(seq[1::2]) == {"MAX_1", "MAX_2", "MAX_3"}
+
+    def test_no_adjacent_saddles_returns_empty(self) -> None:
+        assert order_boundary_cycle("MAX_A", {}) == []
+
+    def test_defective_rim_returns_partial_order(self) -> None:
+        """A degree-1 extremum cannot close; the walk returns what it reached.
+
+        Best-effort by design: the viewer renders the partial rim and the card
+        names the defect, which is more useful than drawing nothing.
+        """
+        adj = _make_adj(
+            {
+                "S1": (["MAX_A"], ["MIN_1", "MIN_2"]),
+                "S2": (["MAX_A"], ["MIN_2", "MIN_1"]),
+                "S3": (["MAX_A"], ["MIN_3", "MIN_4"]),
+                "S4": (["MAX_A"], ["MIN_4", "MIN_3"]),
+            }
+        )
+        seq = order_boundary_cycle("MAX_A", adj)
+        # Split rim: only one of the two loops is reachable from the start.
+        assert len(seq) < 8
+        assert seq[0].startswith("S")
+        validity = validate_max_basin_boundary("MAX_A", adj)
+        assert not validity.is_valid
+        assert "cycle" in validity.error
+
+    def test_sequence_matches_validation_counts(self) -> None:
+        adj = _make_adj(
+            {
+                "S1": (["MAX_A", "X"], ["MIN_1", "MIN_2"]),
+                "S2": (["MAX_A", "X"], ["MIN_2", "MIN_3"]),
+                "S3": (["MAX_A", "X"], ["MIN_3", "MIN_1"]),
+            }
+        )
+        seq = order_boundary_cycle("MAX_A", adj)
+        res = validate_max_basin_boundary("MAX_A", adj)
+        assert res.is_valid
+        assert set(seq[0::2]) == set(res.boundary_saddle_ids)
+        assert set(seq[1::2]) == set(res.boundary_extremum_ids)

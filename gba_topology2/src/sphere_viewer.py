@@ -73,6 +73,7 @@ from gba_topology2.src.basin_center import (
 )
 from gba_topology2.src.basin_validator import (
     build_traced_adjacency,
+    order_boundary_cycle,
     validate_all_basin_boundaries,
 )
 from gba_topology2.src.camera_state import (
@@ -130,6 +131,7 @@ from gba_topology2.src.separatrix_tracer import (
     TraceOutcome,
     TraceZone,
     build_walk_adjacency,
+    render_groups_from_outcomes,
 )
 from gba_topology2.src.sphere_frame import (
     compute_atom_frame,
@@ -1137,6 +1139,44 @@ def trace_morse_smale_complex(
     )
 
 
+def separatrix_focus_ids(
+    *,
+    selected_cp: dict[str, Any] | None,
+    selected_basin_center: dict[str, Any] | None,
+    adjacency: dict[str, dict[str, list[str]]],
+    traced_saddle_ids: set[str],
+) -> set[str] | None:
+    """Saddles whose traced branches the current selection should show.
+
+    None means "draw everything": no selection, or a selection that is not part
+    of the Morse-Smale complex (a cluster, a catastrophe). A saddle selection
+    focuses on that saddle's own branches; a min/max selection focuses on the
+    saddles forming that basin's rim, so the rim reads as the closed loop it is.
+
+    Args:
+        selected_cp: The selected CP UI dict, or None.
+        selected_basin_center: The selected basin center dict, or None.
+        adjacency: Traced ``saddle_id -> {"max": [...], "min": [...]}``.
+        traced_saddle_ids: Saddle ids that actually have traced outcomes.
+
+    Returns:
+        The saddle ids to draw, or None for the full trace.
+    """
+    if selected_cp is not None:
+        label = str(selected_cp.get("id_label", ""))
+        if label.startswith(("SAD_", "E-SAD")) and label in traced_saddle_ids:
+            return {label}
+    if selected_basin_center is not None and adjacency:
+        rim = order_boundary_cycle(str(selected_basin_center["id"]), adjacency)
+        # Rim ids alternate saddle / extremum, starting with a saddle.
+        saddles = {
+            sid for i, sid in enumerate(rim) if i % 2 == 0 and sid in traced_saddle_ids
+        }
+        if saddles:
+            return saddles
+    return None
+
+
 @dataclass
 class ViewerSession:
     """The mesh-bound state of the viewer for one atom of one file.
@@ -1703,6 +1743,91 @@ def run_sphere_viewer(
     launch_descent_actor.SetVisibility(False)
     renderer.AddActor(launch_descent_actor)
 
+    # 9b. Traced separatrices (Basin Locator Step 3).
+    # Plain line actors, not tubes: the traced paths are long polylines and two
+    # of the four classes must be dashed, which stippling only does on lines.
+    #
+    #   ascent         orange-red  (ridge, towards maxima)   - matches launch stubs
+    #   descent        cyan        (valley, towards minima)  - matches launch stubs
+    #   saddle-saddle  magenta, thin, dashed  - a corridor separatrix, which the
+    #                                rim validator does not consume yet, so it
+    #                                must not read as a basin edge
+    #   low-confidence grey, dashed - the walk did not absorb the branch, so its
+    #                                target is a guess and is shown as one
+    def _make_separatrix_actor(
+        color: tuple[float, float, float],
+        width: float,
+        stipple: int | None,
+    ) -> tuple[vtkPolyData, vtkActor]:
+        poly = vtkPolyData()
+        mapper = vtkPolyDataMapper()
+        mapper.SetInputData(poly)
+        mapper.ScalarVisibilityOff()
+        actor = vtkActor()
+        actor.SetMapper(mapper)
+        actor.GetProperty().SetColor(*color)
+        actor.GetProperty().SetLineWidth(width)
+        actor.GetProperty().SetAmbient(0.85)
+        actor.GetProperty().SetDiffuse(0.15)
+        if stipple is not None:
+            actor.GetProperty().SetLineStipplePattern(stipple)
+        actor.SetVisibility(False)
+        renderer.AddActor(actor)
+        return poly, actor
+
+    sep_ascent_poly, sep_ascent_actor = _make_separatrix_actor(
+        (1.0, 0.35, 0.10), 3.0, None
+    )
+    sep_descent_poly, sep_descent_actor = _make_separatrix_actor(
+        (0.10, 0.75, 1.0), 3.0, None
+    )
+    sep_sadsad_poly, sep_sadsad_actor = _make_separatrix_actor(
+        (0.85, 0.20, 0.95), 1.4, 0xF0F0
+    )
+    sep_lowconf_poly, sep_lowconf_actor = _make_separatrix_actor(
+        (0.55, 0.55, 0.55), 1.4, 0x8888
+    )
+
+    def _set_poly_lines(
+        poly: vtkPolyData, lines: list[list[tuple[float, float, float]]]
+    ) -> None:
+        """Replace a polydata's lines with centred-frame polylines (lifted off)."""
+        pts_acc = vtkPoints()
+        cells = vtkCellArray()
+        for line in lines:
+            start = pts_acc.GetNumberOfPoints()
+            for pos in line:
+                lifted = to_global(radial_offset(pos, 1.02), session.center)
+                pts_acc.InsertNextPoint(lifted[0], lifted[1], lifted[2])
+            cells.InsertNextCell(len(line))
+            for k in range(len(line)):
+                cells.InsertCellPoint(start + k)
+        poly.SetPoints(pts_acc)
+        poly.SetLines(cells)
+        poly.Modified()
+
+    def _render_separatrices(
+        groups: dict[str, list[list[tuple[float, float, float]]]], visible: bool
+    ) -> None:
+        """Push traced polylines into the four actors and set visibility."""
+        _set_poly_lines(sep_ascent_poly, groups.get("ascent", []))
+        _set_poly_lines(sep_descent_poly, groups.get("descent", []))
+        _set_poly_lines(sep_sadsad_poly, groups.get("saddle_saddle", []))
+        _set_poly_lines(sep_lowconf_poly, groups.get("low_confidence", []))
+        sep_ascent_actor.SetVisibility(visible and bool(groups.get("ascent")))
+        sep_descent_actor.SetVisibility(visible and bool(groups.get("descent")))
+        sep_sadsad_actor.SetVisibility(visible and bool(groups.get("saddle_saddle")))
+        sep_lowconf_actor.SetVisibility(visible and bool(groups.get("low_confidence")))
+
+    def _hide_separatrices() -> None:
+        for actor in (
+            sep_ascent_actor,
+            sep_descent_actor,
+            sep_sadsad_actor,
+            sep_lowconf_actor,
+        ):
+            actor.SetVisibility(False)
+
     renderer.ResetCamera()
 
     # Trame Server Setup
@@ -1794,6 +1919,7 @@ def run_sphere_viewer(
     runtime_traced_adjacency: dict[str, dict[str, list[str]]] = {}
     runtime_trace_outcomes: dict[str, list[TraceOutcome]] = {}
     runtime_basin_validity: Any = None
+    runtime_launch_seeds: list[SaddleLaunchSeed] = []
 
     # Re-entrancy latch for bulk state writes (see reset_defaults). Trame fires a
     # @state.change callback per changed key, so a 19-key batched reset would
@@ -2464,6 +2590,8 @@ def run_sphere_viewer(
         ]
         seeds = [o.seed for o in outcomes if o.converged]
         launch_summary = summarize_outcomes(outcomes)
+        nonlocal runtime_launch_seeds
+        runtime_launch_seeds = seeds
 
         a_pts, a_lines = vtkPoints(), vtkCellArray()
         d_pts, d_lines = vtkPoints(), vtkCellArray()
@@ -2534,12 +2662,14 @@ def run_sphere_viewer(
             runtime_trace_outcomes = traced.outcomes
             runtime_basin_validity = traced.validity
             state.separatrix_stats = traced.stats
+            render_traced_separatrices()
         else:
             runtime_trace_zones = []
             runtime_traced_adjacency = {}
             runtime_trace_outcomes = {}
             runtime_basin_validity = None
             state.separatrix_stats = {}
+            _hide_separatrices()
 
         n_raw_hidden = len(hidden_vertex_ids)
         state.display_counts = {
@@ -2598,6 +2728,31 @@ def run_sphere_viewer(
         render_window.Render()
         request_view_update()
 
+    def focus_ids_for_selection() -> set[str] | None:
+        """The separatrix focus implied by the current selection."""
+        return separatrix_focus_ids(
+            selected_cp=state.selected_cp,
+            selected_basin_center=state.selected_basin_center,
+            adjacency=runtime_traced_adjacency,
+            traced_saddle_ids=set(runtime_trace_outcomes),
+        )
+
+    def render_traced_separatrices() -> None:
+        """Draw the traced complex, focused on the current selection."""
+        if not state.show_separatrices or not runtime_trace_outcomes:
+            _hide_separatrices()
+            return
+        saddle_positions = {
+            seed.saddle_id: seed.saddle_position for seed in runtime_launch_seeds
+        }
+        groups = render_groups_from_outcomes(
+            runtime_trace_outcomes,
+            session.pts_np,
+            saddle_positions,
+            focus_ids_for_selection(),
+        )
+        _render_separatrices(groups, visible=True)
+
     def select_cp(cp_item: dict[str, Any] | None) -> None:
         state.selected_cp = cp_item
         if cp_item is None:
@@ -2609,6 +2764,7 @@ def run_sphere_viewer(
             highlight_src.SetCenter(p[0], p[1], p[2])
             highlight_src.Update()
             highlight_actor.SetVisibility(True)
+        render_traced_separatrices()
         render_window.Render()
         request_view_update()
 
@@ -2669,6 +2825,7 @@ def run_sphere_viewer(
             basin_center_src.SetCenter(p[0], p[1], p[2])
             basin_center_src.Update()
             basin_center_actor.SetVisibility(True)
+        render_traced_separatrices()
         render_window.Render()
         request_view_update()
 
