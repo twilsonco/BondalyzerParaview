@@ -72,6 +72,7 @@ from gba_topology2.src.basin_center import (
     extract_basin_centers,
 )
 from gba_topology2.src.basin_validator import (
+    SaddleAdjacency,
     build_traced_adjacency,
     order_boundary_cycle,
     validate_all_basin_boundaries,
@@ -1143,6 +1144,101 @@ def trace_morse_smale_complex(
     )
 
 
+def separatrix_card_data(
+    *,
+    selected_cp: dict[str, Any] | None,
+    selected_basin_center: dict[str, Any] | None,
+    adjacency: SaddleAdjacency,
+    outcomes: dict[str, list[TraceOutcome]],
+    validity: Any,
+) -> dict[str, Any] | None:
+    """Build the separatrix section of the inspector card.
+
+    A saddle selection reports every traced branch: which basin it reached,
+    how confident that is, how far it travelled, and whether it had to tunnel
+    through a noise cluster. A min/max selection reports the basin's rim: the
+    alternating id sequence, the validity verdict, and the failing condition
+    named when it is invalid.
+
+    Saddle-saddle landings are listed apart from the basin edges, with a note
+    that the rim validator does not consume them yet -- drawing them as basin
+    edges would overstate what has been checked.
+
+    Args:
+        selected_cp: The selected CP UI dict, or None.
+        selected_basin_center: The selected basin center dict, or None.
+        adjacency: Traced Morse-Smale adjacency.
+        outcomes: ``saddle_id -> [TraceOutcome]`` from the trace.
+        validity: ``SimplificationValidity`` from the last trace, or None.
+
+    Returns:
+        Card dict, or None when the selection has nothing traced to show.
+    """
+    if not outcomes and not adjacency:
+        return None
+
+    label = str((selected_cp or {}).get("id_label", ""))
+    if label.startswith(("SAD_", "E-SAD")):
+        branch_list = outcomes.get(label, [])
+        branches = [
+            {
+                "sector": f"{out.direction} #{i + 1}",
+                "direction": out.direction,
+                "target": out.target_label
+                or ("raw extremum" if out.status == "raw_extremum" else "unresolved"),
+                "status": out.status,
+                "confidence": out.confidence,
+                "hops": out.n_steps,
+                "length_deg": math.degrees(out.angular_length_rad),
+                "tunnels": out.tunnel_count,
+            }
+            for i, out in enumerate(branch_list)
+        ]
+        entry = adjacency.get(label, {})
+        return {
+            "kind": "saddle",
+            "id": label,
+            "branches": branches,
+            "saddle_saddle": list(entry.get("sad", [])),
+            "n_branches": len(branches),
+            "n_absorbed": sum(1 for b in branches if b["status"] == "absorbed"),
+            "n_tunnels": sum(b["tunnels"] for b in branches),
+        }
+
+    basin_id: str | None = None
+    if label.startswith(("MAX_", "MIN_", "E-MAX", "E-MIN")):
+        basin_id = label
+    elif selected_basin_center is not None:
+        basin_id = str(selected_basin_center["id"])
+    if basin_id is None or validity is None:
+        return None
+
+    result = next(
+        (r for r in validity.results if r.basin_id == basin_id),
+        None,
+    )
+    if result is None:
+        return None
+    rim = order_boundary_cycle(basin_id, adjacency)
+    polarity = "maximum" if basin_id.startswith(("MAX_", "E-MAX")) else "minimum"
+    return {
+        "kind": "basin",
+        "id": basin_id,
+        "polarity": polarity,
+        "rim": rim,
+        "is_valid": result.is_valid,
+        "error": result.error,
+        "n_saddles": result.n_saddles,
+        "n_extrema": result.n_extrema,
+        "n_max_valid": validity.n_max_valid,
+        "n_max_total": validity.n_max_total,
+        "n_min_valid": validity.n_min_valid,
+        "n_min_total": validity.n_min_total,
+        "all_valid": validity.is_valid,
+        "summary": validity.summary,
+    }
+
+
 def separatrix_focus_ids(
     *,
     selected_cp: dict[str, Any] | None,
@@ -1882,6 +1978,7 @@ def run_sphere_viewer(
     state.basin_centers_list = []
     state.launch_stats = summarize_outcomes([])
     state.separatrix_stats = {}
+    state.separatrix_card = None
     state.selected_cp = None
     state.selected_cluster = None
     state.selected_catastrophe = None
@@ -2662,6 +2759,7 @@ def run_sphere_viewer(
             runtime_trace_outcomes = {}
             runtime_basin_validity = None
             state.separatrix_stats = {}
+            state.separatrix_card = None
             _hide_separatrices()
 
         n_raw_hidden = len(hidden_vertex_ids)
@@ -2730,8 +2828,22 @@ def run_sphere_viewer(
             traced_saddle_ids=set(runtime_trace_outcomes),
         )
 
+    def refresh_separatrix_card() -> None:
+        """Recompute the inspector card's separatrix section for the selection."""
+        if not state.show_separatrices:
+            state.separatrix_card = None
+            return
+        state.separatrix_card = separatrix_card_data(
+            selected_cp=state.selected_cp,
+            selected_basin_center=state.selected_basin_center,
+            adjacency=runtime_traced_adjacency,
+            outcomes=runtime_trace_outcomes,
+            validity=runtime_basin_validity,
+        )
+
     def render_traced_separatrices() -> None:
         """Draw the traced complex, focused on the current selection."""
+        refresh_separatrix_card()
         if not state.show_separatrices or not runtime_trace_outcomes:
             _hide_separatrices()
             return
@@ -4337,6 +4449,48 @@ def run_sphere_viewer(
                                     classes="text-body-2 font-mono",
                                 )
 
+                        # Basin rim: the traced alternating boundary cycle.
+                        with html.Div(
+                            v_if="separatrix_card && separatrix_card.kind === 'basin'",
+                            classes="mt-3",
+                        ):
+                            v3.VDivider(classes="mb-2")
+                            html.Div(
+                                "Basin Boundary (Traced Rim)",
+                                classes="text-caption font-weight-bold text-teal mb-1",
+                            )
+                            v3.VAlert(
+                                "{{ separatrix_card.is_valid ? '✓ Valid alternating cycle' : '✗ ' + separatrix_card.error }}",
+                                type=(
+                                    "separatrix_card.is_valid ? 'success' : 'error'",
+                                ),
+                                variant="tonal",
+                                density="compact",
+                                classes="mb-2",
+                            )
+                            html.Div(
+                                "{{ separatrix_card.n_saddles }} saddles · {{ separatrix_card.n_extrema }} {{ separatrix_card.polarity === 'maximum' ? 'minima' : 'maxima' }}",
+                                classes="text-caption font-mono text-medium-emphasis mb-2",
+                            )
+                            html.Div(
+                                "Rim order",
+                                classes="text-caption text-medium-emphasis",
+                            )
+                            with html.Div(
+                                v_for="(node, ni) in separatrix_card.rim",
+                                key="node + '-' + ni",
+                                classes="text-caption font-mono d-flex",
+                            ):
+                                html.Span(
+                                    "{{ String(ni + 1).padStart(2, '0') }}.",
+                                    classes="text-medium-emphasis mr-2",
+                                )
+                                html.Span("{{ node }}")
+                            html.Div(
+                                "Configuration: {{ separatrix_card.n_max_valid }}/{{ separatrix_card.n_max_total }} max rims · {{ separatrix_card.n_min_valid }}/{{ separatrix_card.n_min_total }} min rims",
+                                classes="text-caption font-mono text-medium-emphasis mt-2",
+                            )
+
                 # Basin Locator Step 2: Saddle Launch Seeds Card
                 with v3.VCard(elevation=2, classes="mb-3", color="surface-variant"):
                     with v3.VCardItem():
@@ -4772,6 +4926,69 @@ def run_sphere_viewer(
                             ):
                                 html.Span("{{ mem.id_label }}")
                                 html.Span("{{ mem.value.toFixed(6) }}")
+
+                        # Traced separatrices for this saddle: where each
+                        # separatrix branch actually ended up.
+                        with html.Div(
+                            v_if="separatrix_card && separatrix_card.kind === 'saddle'",
+                            classes="mt-3",
+                        ):
+                            v3.VDivider(classes="mb-2")
+                            html.Div(
+                                "Traced Separatrix Branches",
+                                classes="text-caption font-weight-bold text-teal mb-1",
+                            )
+                            html.Div(
+                                "Absorbed {{ separatrix_card.n_absorbed }}/{{ separatrix_card.n_branches }} · {{ separatrix_card.n_tunnels }} noise tunnel(s)",
+                                classes="text-caption font-mono text-medium-emphasis mb-2",
+                            )
+                            with v3.VTable(density="compact", classes="bg-transparent"):
+                                with html.Tbody():
+                                    with html.Tr(
+                                        v_for="b in separatrix_card.branches",
+                                        key="b.sector",
+                                    ):
+                                        html.Td(
+                                            "{{ b.sector }}",
+                                            classes="text-caption font-mono",
+                                        )
+                                        html.Td(
+                                            "{{ b.target }}",
+                                            classes="text-caption font-mono font-weight-bold",
+                                        )
+                                        html.Td(
+                                            "{{ b.hops }} hops · {{ b.length_deg.toFixed(1) }}°",
+                                            classes="text-caption font-mono text-medium-emphasis",
+                                        )
+                                        html.Td(
+                                            "{{ b.confidence }}",
+                                            classes="text-caption font-mono",
+                                            style=(
+                                                (
+                                                    "b.confidence === 'high'"
+                                                    " ? 'color:#1B5E20'"
+                                                    " : (b.confidence === 'medium'"
+                                                    " ? 'color:#7A4100'"
+                                                    " : 'color:#A5231C')"
+                                                ),
+                                            ),
+                                        )
+                            with html.Div(
+                                v_if="separatrix_card.saddle_saddle.length > 0",
+                                classes="mt-2 pa-2 rounded surface",
+                            ):
+                                html.Div(
+                                    "Saddle-saddle separatrix (corridor)",
+                                    classes="text-caption font-weight-bold text-purple",
+                                )
+                                html.Div(
+                                    "{{ separatrix_card.saddle_saddle.join(', ') }}",
+                                    classes="text-caption font-mono",
+                                )
+                                html.Div(
+                                    "Not consumed by rim validation yet.",
+                                    classes="text-caption text-medium-emphasis font-italic",
+                                )
 
         # Toolbar
         with layout.toolbar:

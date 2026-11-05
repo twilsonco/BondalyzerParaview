@@ -707,3 +707,174 @@ class TestSeparatrixFocusIds:
             traced_saddle_ids={"SAD_1"},
         )
         assert focus == {"SAD_1"}
+
+
+def _outcome(
+    direction: str,
+    target: str | None,
+    kind: str | None,
+    status: str,
+    hops: int = 5,
+    length_rad: float = 0.4,
+    tunnels: int = 0,
+) -> Any:
+    from gba_topology2.src.separatrix_tracer import TraceOutcome
+
+    return TraceOutcome(
+        direction=direction,
+        start_vertex=0,
+        target_label=target,
+        target_kind=kind,
+        status=status,
+        n_steps=hops,
+        path=list(range(hops + 1)),
+        tunnel_count=tunnels,
+        angular_length_rad=length_rad,
+    )
+
+
+class TestSeparatrixCardData:
+    """separatrix_card_data(): the inspector card's separatrix section."""
+
+    ADJ: ClassVar[dict[str, dict[str, list[str]]]] = {
+        "SAD_1": {"max": ["MAX_A", "MAX_B"], "min": ["MIN_1", "MIN_2"]},
+        "SAD_2": {"max": ["MAX_A", "MAX_B"], "min": ["MIN_2", "MIN_3"]},
+        "SAD_3": {"max": ["MAX_A", "MAX_B"], "min": ["MIN_3", "MIN_1"]},
+    }
+
+    @staticmethod
+    def _validity(adj: dict[str, dict[str, list[str]]]) -> Any:
+        from gba_topology2.src.basin_center import BasinCenter
+        from gba_topology2.src.basin_validator import validate_all_basin_boundaries
+
+        centers = [
+            BasinCenter("MAX_A", "maximum", (0.0, 0.0, 1.0), 1.0, False),
+            BasinCenter("MIN_1", "minimum", (1.0, 0.0, -0.5), 0.0, False),
+            BasinCenter("MIN_2", "minimum", (-1.0, 0.0, -0.5), 0.0, False),
+            BasinCenter("MIN_3", "minimum", (0.0, 1.0, -0.5), 0.0, False),
+        ]
+        return validate_all_basin_boundaries(centers, adj)
+
+    def _card(
+        self,
+        cp: dict[str, Any] | None = None,
+        basin: dict[str, Any] | None = None,
+        outcomes: dict[str, list[Any]] | None = None,
+        adj: dict[str, dict[str, list[str]]] | None = None,
+    ) -> Any:
+        adj = self.ADJ if adj is None else adj
+        return sv.separatrix_card_data(
+            selected_cp=cp,
+            selected_basin_center=basin,
+            adjacency=adj,
+            outcomes={} if outcomes is None else outcomes,
+            validity=self._validity(adj),
+        )
+
+    def test_nothing_traced_returns_none(self) -> None:
+        assert (
+            sv.separatrix_card_data(
+                selected_cp={"id_label": "SAD_1"},
+                selected_basin_center=None,
+                adjacency={},
+                outcomes={},
+                validity=None,
+            )
+            is None
+        )
+
+    def test_saddle_card_lists_branches(self) -> None:
+        outcomes = {
+            "SAD_1": [
+                _outcome("ascent", "MAX_A", "absorb_max", "absorbed", hops=7),
+                _outcome("ascent", "MAX_B", "absorb_max", "absorbed"),
+                _outcome("descent", "MIN_1", "absorb_min", "absorbed", tunnels=2),
+                _outcome("descent", "MIN_2", "absorb_min", "absorbed"),
+            ]
+        }
+        card = self._card(cp={"id_label": "SAD_1"}, outcomes=outcomes)
+        assert card is not None
+        assert card["kind"] == "saddle"
+        assert card["n_branches"] == 4
+        assert card["n_absorbed"] == 4
+        assert card["n_tunnels"] == 2
+        first = card["branches"][0]
+        assert first["target"] == "MAX_A"
+        assert first["confidence"] == "high"
+        assert first["hops"] == 7
+        assert first["length_deg"] == pytest.approx(math.degrees(0.4))
+
+    def test_saddle_card_reports_unabsorbed_branches(self) -> None:
+        outcomes = {
+            "SAD_1": [
+                _outcome("ascent", "MAX_A", "absorb_max", "absorbed"),
+                _outcome("descent", None, None, "raw_extremum"),
+            ]
+        }
+        card = self._card(cp={"id_label": "SAD_1"}, outcomes=outcomes)
+        assert card is not None
+        assert card["n_absorbed"] == 1
+        assert card["branches"][1]["target"] == "raw extremum"
+        assert card["branches"][1]["confidence"] == "medium"
+
+    def test_saddle_card_lists_saddle_saddle_separately(self) -> None:
+        adj = {
+            "SAD_1": {
+                "max": ["MAX_A"],
+                "min": ["MIN_1"],
+                "sad": ["SAD_9"],
+            }
+        }
+        outcomes = {
+            "SAD_1": [
+                _outcome("ascent", "MAX_A", "absorb_max", "absorbed"),
+                _outcome("descent", "MIN_1", "absorb_min", "absorbed"),
+                _outcome("ascent", "SAD_9", "absorb_sad", "absorbed"),
+            ]
+        }
+        card = self._card(cp={"id_label": "SAD_1"}, outcomes=outcomes, adj=adj)
+        assert card is not None
+        assert card["saddle_saddle"] == ["SAD_9"]
+
+    def test_basin_card_reports_valid_rim(self) -> None:
+        card = self._card(basin={"id": "MAX_A"})
+        assert card is not None
+        assert card["kind"] == "basin"
+        assert card["is_valid"] is True
+        assert card["polarity"] == "maximum"
+        assert len(card["rim"]) == 6
+        assert card["n_saddles"] == 3
+        assert card["n_extrema"] == 3
+        assert card["n_max_valid"] == 1
+        assert card["n_min_total"] == 3
+
+    def test_basin_card_names_the_defect_when_invalid(self) -> None:
+        """A degree-1 extremum: the card must show the failing condition."""
+        adj = {
+            "SAD_1": {"max": ["MAX_A"], "min": ["MIN_1", "MIN_2"]},
+            "SAD_2": {"max": ["MAX_A"], "min": ["MIN_2", "MIN_1"]},
+            "SAD_3": {"max": ["MAX_A"], "min": ["MIN_1", "MIN_3"]},
+        }
+        card = self._card(basin={"id": "MAX_A"}, adj=adj)
+        assert card is not None
+        assert card["is_valid"] is False
+        assert "degree" in card["error"]
+        # The rim is still returned (partial), so the viewer draws the defect.
+        assert len(card["rim"]) >= 2
+
+    def test_extremum_cp_click_yields_basin_card(self) -> None:
+        card = self._card(cp={"id_label": "MAX_A"})
+        assert card is not None
+        assert card["kind"] == "basin"
+        assert card["id"] == "MAX_A"
+
+    def test_cluster_selection_returns_none(self) -> None:
+        assert self._card(cp={"id_label": "MC12"}) is None
+
+    def test_card_data_is_json_serialisable(self) -> None:
+        """The card dict is bound into the Vue template, so it must be plain."""
+        import json
+
+        outcomes = {"SAD_1": [_outcome("ascent", "MAX_A", "absorb_max", "absorbed")]}
+        card = self._card(cp={"id_label": "SAD_1"}, outcomes=outcomes)
+        json.dumps(card)
