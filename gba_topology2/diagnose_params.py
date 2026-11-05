@@ -77,18 +77,15 @@ from gba_topology2.src.morse_detector import (
     MorseDetectionResult,
     compute_discrete_morse_cps,
 )
+from gba_topology2.src.morse_smale import trace_zones_from_reduction
 from gba_topology2.src.point_locator import make_kdtree_nearest_finder
 from gba_topology2.src.polarity_detector import (
     classify_cluster_polarity,
     effective_reduction_decision,
 )
 from gba_topology2.src.saddle_launch import SaddleLaunchSeed
-from gba_topology2.src.separatrix_tracer import (
-    TraceZone,
-    build_walk_adjacency,
-    make_zones,
-)
-from gba_topology2.src.sphere_frame import to_global, to_local
+from gba_topology2.src.separatrix_tracer import TraceZone, build_walk_adjacency
+from gba_topology2.src.sphere_frame import to_global
 from gba_topology2.src.sphere_viewer import (
     PARAM_BOOL_KEYS,
     PARAM_CONTEXT_STRING_KEYS,
@@ -748,16 +745,10 @@ def stage_launch(ctx: RunContext) -> dict[str, Any]:
 def build_trace_zones(ctx: RunContext) -> list[TraceZone]:
     """Assemble absorption and pass-through caps from the finished reduction.
 
-    Labels live in basin-center/seed id space so traced endpoints plug straight
-    into ``SaddleAdjacency``: raw CPs as ``MAX_<vid>`` / ``MIN_<vid>`` /
-    ``SAD_<vid>``, effective CPs as their ``id_label`` (``E-MAX_MC28`` ...).
-
-    Zone radii:
-    - effective CPs: the excision radius recorded at reduction
-      (``eff_ring_radius``), so the whole cluster absorbs as one CP;
-    - visible raw CPs: the lone-critical-point rule used by the launch seeds;
-    - annihilated (net-index-0) units: pass-through caps at the unit's own
-      angular radius, so walks cross noise clusters without terminating.
+    Thin adapter onto :func:`morse_smale.trace_zones_from_reduction`, which the
+    viewer calls with the same arguments it has on hand. Keeping the geometry in
+    one shared subroutine is what makes a headless reproduction of an on-screen
+    observation trustworthy.
 
     Args:
         ctx: Finished run context (reduction and basins stages must have run).
@@ -766,69 +757,18 @@ def build_trace_zones(ctx: RunContext) -> list[TraceZone]:
         Zone list for ``build_traced_adjacency``.
     """
     morse = ctx.require_morse()
-    k_pitch = float(_p(ctx, "k_pitch"))
-    lone_a0 = max(math.radians(1.5), k_pitch * ctx.delta_theta_rad / 2.0)
-
-    maxima: list[tuple[str, tuple[float, float, float]]] = []
-    minima: list[tuple[str, tuple[float, float, float]]] = []
-    saddles: list[tuple[str, tuple[float, float, float]]] = []
-    caps: dict[str, float] = {}
-
-    for cp in morse.maxima:
-        if cp.vertex_id in ctx.hidden_vertex_ids:
-            continue
-        label = f"MAX_{cp.vertex_id}"
-        maxima.append((label, cp.position))
-        caps[label] = lone_a0
-    for cp in morse.minima:
-        if cp.vertex_id in ctx.hidden_vertex_ids:
-            continue
-        label = f"MIN_{cp.vertex_id}"
-        minima.append((label, cp.position))
-        caps[label] = lone_a0
-    for cp in morse.saddles:
-        if cp.vertex_id in ctx.hidden_vertex_ids:
-            continue
-        label = f"SAD_{cp.vertex_id}"
-        saddles.append((label, cp.position))
-        caps[label] = lone_a0
-
-    for eff in ctx.effective_cps:
-        label = str(eff["id_label"])
-        pos = to_local(tuple(eff["position"]), ctx.center)
-        kind = eff["type"]
-        if kind == "E-MAX":
-            maxima.append((label, pos))
-        elif kind == "E-MIN":
-            minima.append((label, pos))
-        elif kind == "E-SAD":
-            saddles.append((label, pos))
-        else:
-            continue
-        caps[label] = ctx.eff_ring_radius.get(label, lone_a0)
-
-    passthrough: list[tuple[str, tuple[float, float, float], float]] = []
-    by_id = {u.unit_id: u for u in ctx.units}
-    for uid in sorted(ctx.annihilated_units):
-        unit = by_id.get(uid)
-        if unit is None:
-            continue
-        passthrough.append(
-            (
-                f"ANNUL_{uid}",
-                unit.centroid,
-                max(unit.as_cluster.angular_radius_rad, lone_a0),
-            )
-        )
-
-    return make_zones(
-        ctx.pts,
-        ctx.triangles,
-        visible_maxima=maxima,
-        visible_minima=minima,
-        visible_saddles=saddles,
-        absorption_caps=caps,
-        passthrough=passthrough,
+    return trace_zones_from_reduction(
+        maxima=morse.maxima,
+        minima=morse.minima,
+        saddles=morse.saddles,
+        effective_cps=ctx.effective_cps,
+        units=ctx.units,
+        eff_ring_radius=ctx.eff_ring_radius,
+        hidden_vertex_ids=ctx.hidden_vertex_ids,
+        annihilated_unit_ids=ctx.annihilated_units,
+        center=ctx.center,
+        delta_theta_mesh_rad=ctx.delta_theta_rad,
+        k_pitch=float(_p(ctx, "k_pitch")),
     )
 
 

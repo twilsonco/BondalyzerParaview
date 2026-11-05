@@ -303,8 +303,6 @@ class TestPassThroughAndTunneling:
 class TestMakeZones:
     def test_zone_kinds_and_labels(self) -> None:
         zones = make_zones(
-            PTS,
-            TRIS,
             visible_maxima=[("MAX_1", (0.0, 0.0, 1.0))],
             visible_minima=[("MIN_1", (0.0, 0.0, -1.0))],
             visible_saddles=[("SAD_1", (1.0, 0.0, 0.0))],
@@ -325,8 +323,6 @@ class TestMakeZones:
 
     def test_center_at_origin_is_skipped(self) -> None:
         zones = make_zones(
-            PTS,
-            TRIS,
             visible_maxima=[("BAD", (0.0, 0.0, 0.0))],
             visible_minima=[],
             visible_saddles=[],

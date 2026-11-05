@@ -332,8 +332,6 @@ def trace_separatrix(
 
 
 def make_zones(
-    pts: npt.NDArray[np.float64],
-    triangles: npt.NDArray[np.integer[Any]],
     *,
     visible_maxima: list[tuple[str, tuple[float, float, float]]],
     visible_minima: list[tuple[str, tuple[float, float, float]]],
@@ -344,10 +342,10 @@ def make_zones(
 ) -> list[TraceZone]:
     """Assemble trace zones from visible CPs, cluster caps, and annihilations.
 
+    Zone geometry is purely angular (a unit direction plus a cosine radius), so
+    no mesh is needed; the tracer tests vertices against these caps itself.
+
     Args:
-        pts: (N, 3) centred-frame vertices (used for radius sanity checks).
-        triangles: (M, 3) indices; accepted for API symmetry with the tracer's
-            adjacency builder and future edge-based caps.
         visible_maxima: ``(label, position)`` for each visible maximum.
         visible_minima: ``(label, position)`` for each visible minimum.
         visible_saddles: ``(label, position)`` for each visible saddle.
@@ -361,7 +359,6 @@ def make_zones(
     Returns:
         Zone list in stable order (absorption first, then passthrough).
     """
-    _ = triangles  # reserved for edge-cap refinements; keeps the signature stable
     caps = absorption_caps or {}
     zones: list[TraceZone] = []
 
