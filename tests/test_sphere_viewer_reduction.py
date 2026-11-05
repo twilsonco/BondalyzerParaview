@@ -592,9 +592,49 @@ class TestSeparatrixFocusIds:
     def test_effective_saddle_selection_focuses_on_itself(self) -> None:
         assert self._focus(cp={"id_label": "E-SAD_MC9"}) == {"E-SAD_MC9"}
 
-    def test_extremum_selection_is_not_a_saddle_focus(self) -> None:
-        """A max/min click focuses on the rim, not on itself as a saddle."""
-        assert self._focus(cp={"id_label": "MAX_A"}) is None
+    def test_extremum_click_focuses_on_its_rim(self) -> None:
+        """Clicking a max/min glyph in 3D draws that basin's rim.
+
+        The CP dict carries the basin id in id_label, so a 3D click on an
+        extremum needs no sidebar basin selection to focus the rim.
+        """
+        assert self._focus(cp={"id_label": "MAX_A"}) == {"SAD_1", "SAD_2", "SAD_3"}
+        assert self._focus(cp={"id_label": "MIN_2"}) is not None
+        for sid in self._focus(cp={"id_label": "MIN_2"}) or set():
+            assert "MIN_2" in self.ADJ[sid]["min"]
+
+    def test_effective_extremum_click_focuses_on_its_rim(self) -> None:
+        adj = {
+            "SAD_1": {"max": ["E-MAX_MC28"], "min": ["MIN_1", "MIN_2"]},
+            "SAD_2": {"max": ["E-MAX_MC28"], "min": ["MIN_2", "MIN_1"]},
+        }
+        focus = sv.separatrix_focus_ids(
+            selected_cp={"id_label": "E-MAX_MC28"},
+            selected_basin_center=None,
+            adjacency=adj,
+            traced_saddle_ids=set(adj),
+        )
+        assert focus == {"SAD_1", "SAD_2"}
+
+    def test_cp_selection_wins_over_stale_basin_selection(self) -> None:
+        """A saddle click must not be overridden by a previously clicked basin."""
+        focus = sv.separatrix_focus_ids(
+            selected_cp={"id_label": "SAD_2"},
+            selected_basin_center={"id": "MAX_A"},
+            adjacency=dict(self.ADJ),
+            traced_saddle_ids=set(self.TRACED),
+        )
+        assert focus == {"SAD_2"}
+
+    def test_untraced_saddle_click_falls_through_to_basin(self) -> None:
+        """A saddle with no trace leaves the basin selection in charge."""
+        focus = sv.separatrix_focus_ids(
+            selected_cp={"id_label": "SAD_999"},
+            selected_basin_center={"id": "MAX_A"},
+            adjacency=dict(self.ADJ),
+            traced_saddle_ids=set(self.TRACED),
+        )
+        assert focus == {"SAD_1", "SAD_2", "SAD_3"}
 
     def test_untraced_saddle_falls_through(self) -> None:
         assert self._focus(cp={"id_label": "SAD_999"}) is None

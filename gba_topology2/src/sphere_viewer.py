@@ -128,10 +128,14 @@ from gba_topology2.src.polarity_detector import (
 )
 from gba_topology2.src.saddle_launch import SaddleLaunchSeed
 from gba_topology2.src.separatrix_tracer import (
+    RENDER_GROUPS,
+    SEPARATRIX_LEGEND,
+    SEPARATRIX_STYLES,
     TraceOutcome,
     TraceZone,
     build_walk_adjacency,
     render_groups_from_outcomes,
+    separatrix_legend_hex,
 )
 from gba_topology2.src.sphere_frame import (
     compute_atom_frame,
@@ -1162,12 +1166,20 @@ def separatrix_focus_ids(
     Returns:
         The saddle ids to draw, or None for the full trace.
     """
+    basin_id: str | None = None
     if selected_cp is not None:
         label = str(selected_cp.get("id_label", ""))
-        if label.startswith(("SAD_", "E-SAD")) and label in traced_saddle_ids:
-            return {label}
-    if selected_basin_center is not None and adjacency:
-        rim = order_boundary_cycle(str(selected_basin_center["id"]), adjacency)
+        if label.startswith(("SAD_", "E-SAD")):
+            if label in traced_saddle_ids:
+                return {label}
+        elif label.startswith(("MAX_", "MIN_", "E-MAX", "E-MIN")):
+            # A CP glyph carries its basin id in id_label, so clicking the
+            # extremum in 3D focuses its rim without a sidebar selection.
+            basin_id = label
+    if basin_id is None and selected_basin_center is not None:
+        basin_id = str(selected_basin_center["id"])
+    if basin_id is not None and adjacency:
+        rim = order_boundary_cycle(basin_id, adjacency)
         # Rim ids alternate saddle / extremum, starting with a saddle.
         saddles = {
             sid for i, sid in enumerate(rim) if i % 2 == 0 and sid in traced_saddle_ids
@@ -1754,11 +1766,8 @@ def run_sphere_viewer(
     #                                must not read as a basin edge
     #   low-confidence grey, dashed - the walk did not absorb the branch, so its
     #                                target is a guess and is shown as one
-    def _make_separatrix_actor(
-        color: tuple[float, float, float],
-        width: float,
-        stipple: int | None,
-    ) -> tuple[vtkPolyData, vtkActor]:
+    def _make_separatrix_actor(group: str) -> tuple[vtkPolyData, vtkActor]:
+        color, width, stipple = SEPARATRIX_STYLES[group]
         poly = vtkPolyData()
         mapper = vtkPolyDataMapper()
         mapper.SetInputData(poly)
@@ -1775,18 +1784,11 @@ def run_sphere_viewer(
         renderer.AddActor(actor)
         return poly, actor
 
-    sep_ascent_poly, sep_ascent_actor = _make_separatrix_actor(
-        (1.0, 0.35, 0.10), 3.0, None
-    )
-    sep_descent_poly, sep_descent_actor = _make_separatrix_actor(
-        (0.10, 0.75, 1.0), 3.0, None
-    )
-    sep_sadsad_poly, sep_sadsad_actor = _make_separatrix_actor(
-        (0.85, 0.20, 0.95), 1.4, 0xF0F0
-    )
-    sep_lowconf_poly, sep_lowconf_actor = _make_separatrix_actor(
-        (0.55, 0.55, 0.55), 1.4, 0x8888
-    )
+    # Keyed by render group, so the legend and the scene read from one table.
+    sep_polys: dict[str, vtkPolyData] = {}
+    sep_actors: dict[str, vtkActor] = {}
+    for _group in RENDER_GROUPS:
+        sep_polys[_group], sep_actors[_group] = _make_separatrix_actor(_group)
 
     def _set_poly_lines(
         poly: vtkPolyData, lines: list[list[tuple[float, float, float]]]
@@ -1810,22 +1812,13 @@ def run_sphere_viewer(
         groups: dict[str, list[list[tuple[float, float, float]]]], visible: bool
     ) -> None:
         """Push traced polylines into the four actors and set visibility."""
-        _set_poly_lines(sep_ascent_poly, groups.get("ascent", []))
-        _set_poly_lines(sep_descent_poly, groups.get("descent", []))
-        _set_poly_lines(sep_sadsad_poly, groups.get("saddle_saddle", []))
-        _set_poly_lines(sep_lowconf_poly, groups.get("low_confidence", []))
-        sep_ascent_actor.SetVisibility(visible and bool(groups.get("ascent")))
-        sep_descent_actor.SetVisibility(visible and bool(groups.get("descent")))
-        sep_sadsad_actor.SetVisibility(visible and bool(groups.get("saddle_saddle")))
-        sep_lowconf_actor.SetVisibility(visible and bool(groups.get("low_confidence")))
+        for group in RENDER_GROUPS:
+            lines = groups.get(group, [])
+            _set_poly_lines(sep_polys[group], lines)
+            sep_actors[group].SetVisibility(visible and bool(lines))
 
     def _hide_separatrices() -> None:
-        for actor in (
-            sep_ascent_actor,
-            sep_descent_actor,
-            sep_sadsad_actor,
-            sep_lowconf_actor,
-        ):
+        for actor in sep_actors.values():
             actor.SetVisibility(False)
 
     renderer.ResetCamera()
@@ -4470,6 +4463,133 @@ def run_sphere_viewer(
                             ):
                                 html.Div(
                                     "Seeds launch from each saddle's excision boundary, expanded until the port signature is pure. k=2 simple, k=3 monkey, k=4 octupolar."
+                                )
+
+                # Basin Locator Step 3: Traced Separatrices & Basin Boundaries
+                with v3.VCard(elevation=2, classes="mb-3", color="surface-variant"):
+                    with v3.VCardItem():
+                        with v3.VCardTitle(
+                            classes="text-subtitle-2 font-weight-bold d-flex align-center justify-space-between"
+                        ):
+                            with html.Div(classes="d-flex align-center"):
+                                v3.VIcon("mdi-spline", classes="mr-2", color="teal")
+                                html.Span("Basins: Step 3 Separatrices")
+                            v3.VChip(
+                                "{{ separatrix_stats.n_branches || 0 }} branches",
+                                size="x-small",
+                                color="teal",
+                            )
+
+                    v3.VDivider()
+                    with v3.VCardText(classes="pt-2 pb-2"):
+                        v3.VSwitch(
+                            label="Show Traced Separatrices (Cluster-Aware)",
+                            v_model=("show_separatrices",),
+                            density="compact",
+                            color="teal",
+                            hide_details=True,
+                            classes="mb-1",
+                        )
+
+                        with html.Div(v_if="show_separatrices"):
+                            with html.Div(classes="mt-2 pa-2 rounded surface"):
+                                with v3.VRow(
+                                    dense=True, classes="text-caption text-center"
+                                ):
+                                    with v3.VCol(cols=4):
+                                        html.Div(
+                                            "Absorbed", classes="text-medium-emphasis"
+                                        )
+                                        html.Div(
+                                            "{{ separatrix_stats.n_absorbed }}/{{ separatrix_stats.n_branches }}",
+                                            classes="text-subtitle-2 font-weight-bold text-success",
+                                        )
+                                    with v3.VCol(cols=4):
+                                        html.Div(
+                                            "Max Rims", classes="text-medium-emphasis"
+                                        )
+                                        html.Div(
+                                            "{{ separatrix_stats.n_max_valid }}/{{ separatrix_stats.n_max_total }}",
+                                            classes=(
+                                                (
+                                                    "separatrix_stats.n_max_valid === separatrix_stats.n_max_total"
+                                                    " ? 'text-subtitle-2 font-weight-bold text-success'"
+                                                    " : 'text-subtitle-2 font-weight-bold text-error'"
+                                                ),
+                                            ),
+                                        )
+                                    with v3.VCol(cols=4):
+                                        html.Div(
+                                            "Min Rims", classes="text-medium-emphasis"
+                                        )
+                                        html.Div(
+                                            "{{ separatrix_stats.n_min_valid }}/{{ separatrix_stats.n_min_total }}",
+                                            classes=(
+                                                (
+                                                    "separatrix_stats.n_min_valid === separatrix_stats.n_min_total"
+                                                    " ? 'text-subtitle-2 font-weight-bold text-success'"
+                                                    " : 'text-subtitle-2 font-weight-bold text-error'"
+                                                ),
+                                            ),
+                                        )
+
+                                with v3.VRow(
+                                    dense=True, classes="text-caption text-center"
+                                ):
+                                    with v3.VCol(cols=6):
+                                        html.Div(
+                                            "Saddle-Saddle",
+                                            classes="text-medium-emphasis",
+                                        )
+                                        html.Div(
+                                            "{{ separatrix_stats.n_saddle_saddle_edges }}",
+                                            classes="text-subtitle-2 font-weight-bold text-purple",
+                                        )
+                                    with v3.VCol(cols=6):
+                                        html.Div(
+                                            "Noise Tunnels",
+                                            classes="text-medium-emphasis",
+                                        )
+                                        html.Div(
+                                            "{{ separatrix_stats.n_tunnels }}",
+                                            classes="text-subtitle-2 font-weight-bold text-grey",
+                                        )
+
+                                with html.Div(
+                                    v_if="separatrix_stats.n_unresolved > 0",
+                                    classes="text-caption font-mono mt-1 text-deep-orange",
+                                ):
+                                    html.Div(
+                                        "Unresolved branches: {{ separatrix_stats.n_raw_extremum + separatrix_stats.n_unresolved }}"
+                                    )
+
+                                # Legend: the four render classes, in their colours.
+                                with html.Div(classes="mt-2"):
+                                    for _group, _lbl in SEPARATRIX_LEGEND:
+                                        _col = separatrix_legend_hex(_group)
+                                        _style = SEPARATRIX_STYLES[_group]
+                                        _dash = _style[2] is not None
+                                        with html.Div(classes="d-flex align-center"):
+                                            html.Div(
+                                                style={
+                                                    "width": "22px",
+                                                    "height": "0",
+                                                    "border-top": (
+                                                        f"3px {'dashed' if _dash else 'solid'} {_col}"
+                                                    ),
+                                                    "margin-right": "8px",
+                                                }
+                                            )
+                                            html.Div(
+                                                _lbl,
+                                                classes="text-caption text-medium-emphasis",
+                                            )
+
+                            with html.Div(
+                                classes="text-caption text-medium-emphasis mt-1 font-italic",
+                            ):
+                                html.Div(
+                                    "Click a saddle to trace its branches, or a min/max to draw its basin rim. Whole clusters absorb as one CP; annihilated (χ=0) clusters are passed through."
                                 )
 
                 # Inspector Card: Selected Catastrophe

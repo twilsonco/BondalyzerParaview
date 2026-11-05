@@ -60,6 +60,8 @@ import numpy.typing as npt
 
 __all__ = [
     "RENDER_GROUPS",
+    "SEPARATRIX_LEGEND",
+    "SEPARATRIX_STYLES",
     "TraceOutcome",
     "TraceZone",
     "ZoneKind",
@@ -67,6 +69,7 @@ __all__ = [
     "build_walk_adjacency_from_edges",
     "make_zones",
     "render_groups_from_outcomes",
+    "separatrix_legend_hex",
     "trace_separatrix",
 ]
 
@@ -468,6 +471,45 @@ RENDER_GROUPS: tuple[str, ...] = (
     "saddle_saddle",
     "low_confidence",
 )
+
+# How each traced class is drawn: RGB, line width, and an optional stipple
+# pattern. Declared once so the actors and the drawer legend cannot drift --
+# a legend swatch in a colour the scene does not use is worse than no legend.
+#
+#   ascent / descent   reuse the launch-seed stub colours, because a traced
+#                      separatrix is the same manifold the stub points along.
+#   saddle_saddle      magenta, thin, dashed: a corridor separatrix, which the
+#                      rim validator does not consume yet and which must not
+#                      read as a basin edge.
+#   low_confidence     grey, dashed: the walk did not absorb the branch, so its
+#                      target is a guess and is drawn as one.
+SEPARATRIX_STYLES: dict[str, tuple[tuple[float, float, float], float, int | None]] = {
+    "ascent": ((1.0, 0.35, 0.10), 3.0, None),
+    "descent": ((0.10, 0.75, 1.0), 3.0, None),
+    "saddle_saddle": ((0.85, 0.20, 0.95), 1.4, 0xF0F0),
+    "low_confidence": ((0.55, 0.55, 0.55), 1.4, 0x8888),
+}
+
+# Legend captions, in the order they are listed in the drawer.
+SEPARATRIX_LEGEND: tuple[tuple[str, str], ...] = (
+    ("ascent", "Ascent (to maxima)"),
+    ("descent", "Descent (to minima)"),
+    ("saddle_saddle", "Saddle-saddle (corridor)"),
+    ("low_confidence", "Low confidence (unabsorbed)"),
+)
+
+
+def separatrix_legend_hex(group: str) -> str:
+    """CSS colour for a traced class, derived from the actor's RGB.
+
+    Args:
+        group: One of ``RENDER_GROUPS``.
+
+    Returns:
+        A ``#RRGGBB`` string matching the actor's ``SetColor``.
+    """
+    rgb = SEPARATRIX_STYLES[group][0]
+    return "#{:02X}{:02X}{:02X}".format(*(round(c * 255) for c in rgb))
 
 
 def render_groups_from_outcomes(
