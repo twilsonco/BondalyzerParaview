@@ -20,6 +20,7 @@ import re
 from typing import Any
 
 import pytest
+from snapshot_params import load_snapshot
 
 import gba_topology2.src.sphere_viewer as sv
 from gba_topology2.src.sphere_viewer import (
@@ -338,3 +339,70 @@ def test_snapshot_with_retired_ring_keys_still_loads() -> None:
     assert "ring_expand_pitch" not in params
     assert "ring_max_pitch" not in params
     assert params["k_pitch"] == DEFAULT_UI_STATE["k_pitch"]
+
+
+def test_new_separatrices_control_round_trips() -> None:
+    """The separatrix toggle is a first-class control: exported, loaded, reset."""
+    payload = _export(show_separatrices=True)
+    assert payload["params"]["bools"]["show_separatrices"] is True
+    params = load_params_from_dict(payload)
+    assert params["show_separatrices"] is True
+    assert DEFAULT_UI_STATE["show_separatrices"] is False
+
+
+def test_snapshot_migration_fills_the_new_control(tmp_path: pathlib.Path) -> None:
+    """A file saved before the control existed migrates to its default.
+
+    The saved snapshots on disk are operator observations and are never
+    rewritten, so tests load them through the migration helper; this pins that
+    the helper's reasoning (a control added after a snapshot means its default)
+    is what load_params_from_dict then accepts.
+    """
+    payload = _export()
+    del payload["params"]["bools"]["show_separatrices"]
+    payload["schema_version"] = 2
+    path = tmp_path / "old.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    migrated = load_snapshot(str(path))
+    assert migrated["schema_version"] == PARAMS_SCHEMA_VERSION
+    assert migrated["params"]["bools"]["show_separatrices"] is False
+    params = load_params_from_dict(migrated)
+    assert params["show_separatrices"] is False
+
+
+def test_snapshot_migration_drops_retired_controls(tmp_path: pathlib.Path) -> None:
+    """Retiring a control is not breaking, so a stale key is dropped, not fatal."""
+    payload = _export()
+    payload["params"]["floats"]["launch_seed_pitch"] = 2.0
+    path = tmp_path / "retired.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    migrated = load_snapshot(str(path))
+    assert "launch_seed_pitch" not in migrated["params"]["floats"]
+    load_params_from_dict(migrated)  # must not raise
+
+
+def test_snapshot_migration_rejects_type_mismatch(tmp_path: pathlib.Path) -> None:
+    """A slider carrying a string is a real corruption, not a version gap."""
+    payload = _export()
+    payload["params"]["floats"]["k_pitch"] = "wide"
+    path = tmp_path / "broken.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(TypeError, match="k_pitch"):
+        load_snapshot(str(path))
+
+
+def test_snapshot_migration_does_not_leak_switches_into_floats(
+    tmp_path: pathlib.Path,
+) -> None:
+    """isinstance(True, int) is True, so bools must not be copied as floats."""
+    payload = _export()
+    payload["params"]["floats"] = {}
+    path = tmp_path / "empty_floats.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    migrated = load_snapshot(str(path))
+    assert set(migrated["params"]["floats"]) == set(sv.PARAM_FLOAT_KEYS)
+    assert all(not isinstance(v, bool) for v in migrated["params"]["floats"].values())

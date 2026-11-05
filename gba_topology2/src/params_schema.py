@@ -97,6 +97,14 @@ DEFAULT_UI_STATE: dict[str, Any] = {
     # are module constants in excision_launch_seeds, because the topology found
     # must not depend on operator tuning.
     "show_launch_seeds": False,
+    # Basin Locator Step 3: traced separatrices and basin boundaries. Enabling
+    # this traces every visible saddle's separatrix branches across the mesh
+    # (cluster-aware: whole clusters absorb as one CP, annihilated clusters are
+    # passed through), builds the Morse-Smale adjacency, and validates each
+    # basin's boundary. The trace runs eagerly so selecting a CP renders its
+    # branches or rim immediately; it costs ~1-2 s per topology update on a 20K
+    # vertex mesh, which is why it is off by default.
+    "show_separatrices": False,
 }
 
 # Schema version of the JSON file written by the "Save Parameters" button.
@@ -108,11 +116,16 @@ DEFAULT_UI_STATE: dict[str, Any] = {
 # so it did not warrant a version bump: files without it still load, and
 # files with it are recognised by the presence of the key.
 #
-# Version 2 adds the excision ring controls. Adding a control is breaking on its
-# own: load_params_from_dict requires every control key to be present, so a
-# version 1 file would fail with a confusing "Missing parameter
-# 'ring_samples'" KeyError. Bumping makes the rejection a clear version message.
-PARAMS_SCHEMA_VERSION = 2
+# Version 2 added the excision ring controls, which Entry 037 later retired.
+# Retiring a control is NOT breaking -- a loader ignores unknown keys -- so the
+# version stayed 2 and v1 files kept loading.
+#
+# Version 3 adds the "show_separatrices" control. Adding a control is breaking
+# on its own: load_params_from_dict requires every control key to be present, so
+# a version 2 file would fail with a confusing "Missing parameter
+# 'show_separatrices'" KeyError. Bumping makes the rejection a clear version
+# message instead.
+PARAMS_SCHEMA_VERSION = 3
 
 # Every editable control, in DEFAULT_UI_STATE's canonical order.
 PARAM_CONTROL_KEYS: tuple[str, ...] = tuple(DEFAULT_UI_STATE)

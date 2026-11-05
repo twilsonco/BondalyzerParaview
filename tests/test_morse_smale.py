@@ -9,12 +9,12 @@ annihilated clusters.
 
 from __future__ import annotations
 
-import json
 import math
 import os
 from typing import Any
 
 import pytest
+from snapshot_params import load_snapshot
 
 from gba_topology2.src.morse_detector import CriticalPoint
 from gba_topology2.src.morse_smale import (
@@ -218,8 +218,7 @@ class TestHarnessAdapterAgreement:
         )
         from gba_topology2.src.sphere_viewer import load_params_from_dict
 
-        with open(ETHENE_PARAMS_JSON) as fh:
-            payload = json.load(fh)
+        payload = load_snapshot(ETHENE_PARAMS_JSON)
         params = load_params_from_dict(payload)
         ctx = build_context(params, plt_path=None, atom_num=None, field_name=None)
         run_stages(ctx)

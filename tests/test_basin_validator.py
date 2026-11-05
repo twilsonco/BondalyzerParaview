@@ -14,6 +14,7 @@ import os
 from typing import Any
 
 import pytest
+from snapshot_params import load_snapshot
 
 from gba_topology2.src.basin_center import BasinCenter
 from gba_topology2.src.basin_validator import (
@@ -402,13 +403,11 @@ ETHENE_PARAMS_JSON = os.path.join(
 
 def _run_validation(overrides: list[str]) -> SimplificationValidity:
     """Helper: run the full diagnose_params pipeline + validator."""
-    import json
 
     from gba_topology2.diagnose_params import apply_overrides, build_context, run_stages
     from gba_topology2.src.sphere_viewer import load_params_from_dict
 
-    with open(ETHENE_PARAMS_JSON) as fh:
-        payload = json.load(fh)
+    payload = load_snapshot(ETHENE_PARAMS_JSON)
 
     params = load_params_from_dict(payload)
     apply_overrides(params, overrides)
@@ -466,7 +465,6 @@ PD20K_PARAMS_JSON = os.path.join(
 
 def _run_traced(overrides: list[str] | None = None) -> tuple[Any, Any, Any]:
     """Run the pipeline and return (ctx, traced_adjacency, outcomes)."""
-    import json
 
     from gba_topology2.diagnose_params import (
         apply_overrides,
@@ -477,8 +475,7 @@ def _run_traced(overrides: list[str] | None = None) -> tuple[Any, Any, Any]:
     from gba_topology2.src.separatrix_tracer import build_walk_adjacency
     from gba_topology2.src.sphere_viewer import load_params_from_dict
 
-    with open(ETHENE_PARAMS_JSON) as fh:
-        payload = json.load(fh)
+    payload = load_snapshot(ETHENE_PARAMS_JSON)
     params = load_params_from_dict(payload)
     apply_overrides(params, overrides or [])
     ctx = build_context(params, plt_path=None, atom_num=None, field_name=None)
@@ -543,7 +540,6 @@ class TestPd20kNoiseHandling:
     """
 
     def _run(self) -> tuple[Any, Any, Any, Any]:
-        import json
 
         from gba_topology2.diagnose_params import (
             build_context,
@@ -553,8 +549,7 @@ class TestPd20kNoiseHandling:
         from gba_topology2.src.separatrix_tracer import build_walk_adjacency
         from gba_topology2.src.sphere_viewer import load_params_from_dict
 
-        with open(PD20K_PARAMS_JSON) as fh:
-            payload = json.load(fh)
+        payload = load_snapshot(PD20K_PARAMS_JSON)
         params = load_params_from_dict(payload)
         ctx = build_context(params, plt_path=None, atom_num=None, field_name=None)
         run_stages(ctx)
@@ -593,7 +588,6 @@ class TestPd20kNoiseHandling:
 
     def test_tangent_heuristic_pollutes_rims_with_annihilated_ids(self) -> None:
         """The heuristic has no zone concept, which is why tracing is needed."""
-        import json
 
         from gba_topology2.diagnose_params import (
             build_context,
@@ -601,8 +595,7 @@ class TestPd20kNoiseHandling:
         )
         from gba_topology2.src.sphere_viewer import load_params_from_dict
 
-        with open(PD20K_PARAMS_JSON) as fh:
-            payload = json.load(fh)
+        payload = load_snapshot(PD20K_PARAMS_JSON)
         params = load_params_from_dict(payload)
         ctx = build_context(params, plt_path=None, atom_num=None, field_name=None)
         run_stages(ctx)

@@ -21,6 +21,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from snapshot_params import load_snapshot
 
 import gba_topology2.src.sphere_viewer as sv
 from gba_topology2.src.camera_state import (
@@ -383,10 +384,9 @@ def test_a_saved_file_without_a_camera_still_resolves() -> None:
     if not os.path.exists(sample):
         pytest.skip("sample snapshot not present")
 
-    with open(sample, encoding="utf-8") as fh:
-        payload = json.load(fh)
-
-    params = load_params_from_dict(payload)
+    # The snapshot predates the separatrix control, so it is migrated first;
+    # this test is about the missing camera section, not the schema version.
+    params = load_params_from_dict(load_snapshot(sample))
     plan = resolve_restore_plan(
         params,
         current_plt_path=os.path.abspath(PLT),
