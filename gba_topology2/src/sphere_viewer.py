@@ -74,7 +74,12 @@ if workspace_root not in sys.path:
 
 from BondalyzerParaView.plt_gba_to_vtm import extract_gba_zones_from_plt
 from BondalyzerParaView.trame_viewer import get_display_title, get_robust_scalar_bounds
+from gba_topology2.src.basin_boundary import (
+    find_minimum_basins,
+    get_basin_arcs,
+)
 from gba_topology2.src.basin_center import (
+    BasinCenter,
     extract_basin_centers,
 )
 from gba_topology2.src.camera_state import (
@@ -2193,6 +2198,11 @@ def run_sphere_viewer(
     # it, which is the only view that shows a gradient climb ending on a point that
     # is not a maximum. Mutually exclusive with selected_basin_center.
     state.selected_saddle_id = None
+    # Minimum basin boundaries: lazily computed cycles enclosing minima
+    state.show_basin_for_selected_minimum = False
+    state.show_all_minimum_basins = False
+    state.selected_minimum_id = None
+    state.minimum_basins_cache = None  # dict[str, MinimumBasin] | None
     # Absolute path of the most recent "Save Parameters" JSON, for the
     # drawer confirmation chip. Export-only: deliberately absent from
     # DEFAULT_UI_STATE and the @state.change decorator (it triggers no
@@ -3310,10 +3320,11 @@ def run_sphere_viewer(
         request_view_update()
 
     def _emit_max_arcs(
-        basin_id: str | None,
+        basin_id: str | None = None,
         saddle_id: str | None = None,
+        basin_arcs: list[MaxConnection] | None = None,
     ) -> None:
-        """Fill the arc actors with the connections of one maximum or one saddle.
+        """Fill the arc actors with the connections of one maximum, saddle, or basin.
 
         A geodesic connection draws in gold, a gradient-traced one in cyan. The
         geometry is the same pipeline -- both are polylines lifted 2% off the
@@ -3333,6 +3344,9 @@ def run_sphere_viewer(
             saddle_id: A selected saddle's seed id, drawing every branch that
                 launches from it. At most one of the two is given; a minimum (or
                 neither) draws nothing.
+            basin_arcs: Ordered list of MaxConnection objects forming a basin
+                boundary. When provided, only these arcs are rendered (overrides
+                basin_id and saddle_id).
         """
         rows: list[dict[str, Any]] = []
         probed: list[MaxConnection] = []
@@ -3344,13 +3358,23 @@ def run_sphere_viewer(
             "geodesic": (vtkPoints(), vtkCellArray()),
             "gradient": (vtkPoints(), vtkCellArray()),
         }
-        if basin_id is not None or saddle_id is not None:
-            for conn in runtime_max_connections:
-                if basin_id is not None:
-                    if conn.max_id != basin_id:
+        # Determine connections to render: basin_arcs override basin_id/saddle_id
+        render_connections: list[MaxConnection] = []
+        if basin_arcs is not None:
+            render_connections = basin_arcs
+        elif basin_id is not None or saddle_id is not None:
+            render_connections = runtime_max_connections
+
+        if render_connections:
+            for conn in render_connections:
+                # Skip filtering when rendering basin_arcs; filter by ID only for
+                # basin_id and saddle_id modes
+                if basin_arcs is None:
+                    if basin_id is not None:
+                        if conn.max_id != basin_id:
+                            continue
+                    elif conn.saddle_id != saddle_id:
                         continue
-                elif conn.saddle_id != saddle_id:
-                    continue
                 # A stalled climb has no max_id and no connector in the old sense,
                 # but it carries the path it travelled: draw it. This is the fix for
                 # "MC18 remains incomplete" -- the branch WAS resolved by the
@@ -4070,6 +4094,162 @@ def run_sphere_viewer(
     @ctrl.add("clear_basin_center_selection")
     def clear_basin_center_selection() -> None:
         select_basin_center(None)
+
+    @ctrl.add("compute_and_show_basin")
+    def compute_and_show_basin(minimum_id: str | None = None) -> None:
+        """Lazily compute basin boundary and update visualization.
+
+        Called when:
+        - User toggles "Show Basin Boundary For Selected Minimum" with a minimum
+        - User toggles "Show All Minimum Basin Boundaries"
+        - User selects a minimum
+
+        Behavior:
+        - If minimum_id is None and show_all_minimum_basins is True: draw all
+        - If minimum_id is not None and show_basin_for_selected_minimum is True:
+          draw only that minimum's boundary
+        - Otherwise: clear basin visualization
+
+        Args:
+            minimum_id: Minimum CP ID to show, or None for "show all" mode.
+        """
+        # Lazily compute basins if not cached
+        if state.minimum_basins_cache is None:
+            connections = _state_list(
+                state.max_connections_list, "max_connections_list"
+            )
+            # Convert dicts back to MaxConnection objects for processing
+            conn_objs: list[MaxConnection] = []
+            for conn_dict in connections:
+                # Reconstruct MaxConnection from dict representation
+                # (max_connections_list contains dicts with all MaxConnection fields)
+                try:
+                    conn_objs.append(
+                        MaxConnection(
+                            saddle_id=str(conn_dict.get("saddle_id", "")),
+                            branch_index=int(conn_dict.get("branch_index", 0)),
+                            max_id=(
+                                str(conn_dict["max_id"])
+                                if conn_dict.get("max_id")
+                                else None
+                            ),
+                            status=str(conn_dict.get("status", "")),
+                            direction_mode=str(conn_dict.get("direction_mode", "")),
+                            cross_track_deg=float(
+                                conn_dict.get("cross_track_deg", 0.0)
+                            ),
+                            along_track_deg=float(
+                                conn_dict.get("along_track_deg", 0.0)
+                            ),
+                            separation_deg=float(conn_dict.get("separation_deg", 0.0)),
+                            mutual=bool(conn_dict.get("mutual", False)),
+                            arc_points=tuple(
+                                tuple(p)  # type: ignore
+                                for p in conn_dict.get("arc_points", [])
+                            ),
+                            saddle_value=float(conn_dict.get("saddle_value", 0.0)),
+                            max_value=(
+                                float(conn_dict["max_value"])
+                                if conn_dict.get("max_value") is not None
+                                else None
+                            ),
+                            verified=bool(conn_dict.get("verified", False)),
+                            blocker_id=(
+                                str(conn_dict["blocker_id"])
+                                if conn_dict.get("blocker_id")
+                                else None
+                            ),
+                            blocker_polarity=(
+                                str(conn_dict["blocker_polarity"])
+                                if conn_dict.get("blocker_polarity")
+                                else None
+                            ),
+                            method=str(conn_dict.get("method", "geodesic")),
+                            failure_gate=(
+                                str(conn_dict["failure_gate"])
+                                if conn_dict.get("failure_gate")
+                                else None
+                            ),
+                            stall_point=(
+                                tuple(conn_dict["stall_point"])  # type: ignore
+                                if conn_dict.get("stall_point")
+                                else None
+                            ),
+                            transited_ids=tuple(
+                                str(id_) for id_ in conn_dict.get("transited_ids", [])
+                            ),
+                            completed_leg_deg=(
+                                float(conn_dict["completed_leg_deg"])
+                                if conn_dict.get("completed_leg_deg") is not None
+                                else None
+                            ),
+                            refined=bool(conn_dict.get("refined", False)),
+                            refine_max_shift_deg=float(
+                                conn_dict.get("refine_max_shift_deg", 0.0)
+                            ),
+                            n_corners=int(conn_dict.get("n_corners", 0)),
+                            n_runs=int(conn_dict.get("n_runs", 0)),
+                            n_nodes=int(conn_dict.get("n_nodes", 0)),
+                            total_turn_before_deg=float(
+                                conn_dict.get("total_turn_before_deg", 0.0)
+                            ),
+                            total_turn_after_deg=float(
+                                conn_dict.get("total_turn_after_deg", 0.0)
+                            ),
+                        )
+                    )
+                except (KeyError, ValueError, TypeError):
+                    # Skip malformed entries
+                    pass
+
+            # Get basin centers
+            basin_centers_dicts = _state_list(
+                state.basin_centers_list, "basin_centers_list"
+            )
+            basin_centers = [
+                BasinCenter(
+                    center_id=str(bc.get("id", "")),
+                    polarity=str(bc.get("polarity", "maximum")),
+                    position=tuple(bc.get("position", (0.0, 0.0, 0.0))),  # type: ignore
+                    value=float(bc.get("value", 0.0)),
+                    is_effective=bool(bc.get("is_effective", False)),
+                    vertex_id=int(bc.get("vertex_id", -1)),
+                    origin_id=(str(bc["origin_id"]) if bc.get("origin_id") else None),
+                    net_index=int(bc.get("net_index", 1)),
+                    member_count=int(bc.get("member_count", 1)),
+                )
+                for bc in basin_centers_dicts
+            ]
+
+            # Compute basins
+            try:
+                state.minimum_basins_cache = find_minimum_basins(
+                    conn_objs, basin_centers
+                )
+            except (ValueError, Exception):
+                # Topology error or malformed data; use empty dict
+                state.minimum_basins_cache = {}
+
+        # Determine which arcs to draw based on toggle states
+        basin_arcs_to_draw: list[MaxConnection] = []
+
+        if state.show_all_minimum_basins and state.minimum_basins_cache:
+            # Draw all basin boundaries
+            for basin in state.minimum_basins_cache.values():
+                basin_arcs_to_draw.extend(get_basin_arcs(basin))
+        elif (
+            state.show_basin_for_selected_minimum
+            and minimum_id
+            and state.minimum_basins_cache
+            and minimum_id in state.minimum_basins_cache
+        ):
+            # Draw only the selected minimum's boundary
+            basin_arcs_to_draw = get_basin_arcs(state.minimum_basins_cache[minimum_id])
+
+        # Render the basin arcs (or clear if no arcs)
+        _emit_max_arcs(basin_id=None, saddle_id=None, basin_arcs=basin_arcs_to_draw)
+        render_window.Render()
+        request_view_update()
 
     # Initial pipeline update
     update_field()
