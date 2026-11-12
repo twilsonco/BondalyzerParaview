@@ -713,6 +713,87 @@ def trace_uphill(
                 return r
         return None
 
+    def _detects_boundary_entry(
+        p_prev: npt.NDArray[np.float64],
+        p_curr: npt.NDArray[np.float64],
+        excluded: set[str],
+    ) -> ExcisionRegion | None:
+        """Detect if the step from p_prev to p_curr crosses a region boundary.
+
+        Returns the first region where the step transitions from outside
+        (distance >= radius) to inside (distance < radius), or None if no entry.
+
+        Args:
+            p_prev: Unit radial position before the step, centred frame.
+            p_curr: Unit radial position after the step, centred frame.
+            excluded: Regions to skip (already transited or starting regions).
+
+        Returns:
+            The ExcisionRegion entered, or None if no entry detected.
+        """
+        for r in excision_regions:
+            if r.region_id in excluded:
+                continue
+            if r.radius_rad <= 0.0:
+                continue
+            dist_prev = angular_distance(p_prev, r.centre_unit)
+            dist_curr = angular_distance(p_curr, r.centre_unit)
+            # Entry: previous was outside or on boundary, current is inside
+            if dist_prev >= r.radius_rad and dist_curr < r.radius_rad:
+                return r
+        return None
+
+    def _boundary_crossing_point(
+        p_prev: npt.NDArray[np.float64],
+        p_curr: npt.NDArray[np.float64],
+        region: ExcisionRegion,
+    ) -> npt.NDArray[np.float64]:
+        """Find the point on the great circle where it crosses the region boundary.
+
+        Uses binary search on the segment from p_prev to p_curr to find where
+        the path intersects the region's boundary (radius_rad from centre_unit).
+
+        Args:
+            p_prev: Unit radial before the step.
+            p_curr: Unit radial after the step.
+            region: The ExcisionRegion being entered.
+
+        Returns:
+            Unit radial at the boundary crossing point, centred frame.
+        """
+        # Binary search on the great circle segment
+        t_low = 0.0
+        t_high = 1.0
+        centre = region.centre_unit
+        target_dist = region.radius_rad
+        # Iterate to refine the crossing point
+        for _ in range(32):  # ~1e-9 precision after 32 iterations
+            t_mid = (t_low + t_high) / 2.0
+            # Interpolate: p(t) = _step(p_prev, direction, t * span)
+            span = angular_distance(p_prev, p_curr)
+            if span < 1e-15:
+                result = unit(p_curr)
+                return (
+                    result if result is not None else p_curr
+                )  # Degenerate step; return current
+            direction = unit(p_curr - float(np.dot(p_curr, p_prev)) * p_prev)
+            if direction is None:
+                return p_curr  # Antipodal; return current
+            p_mid = _step(p_prev, direction, t_mid * span)
+            dist_mid = angular_distance(p_mid, centre)
+            if dist_mid > target_dist:
+                t_high = t_mid  # Still outside; move toward current
+            else:
+                t_low = t_mid  # Inside; move toward previous
+        # Final point at the boundary
+        t_final = (t_low + t_high) / 2.0
+        span = angular_distance(p_prev, p_curr)
+        direction = unit(p_curr - float(np.dot(p_curr, p_prev)) * p_prev)
+        if direction is None:
+            return p_curr
+        result = unit(_step(p_prev, direction, t_final * span))
+        return result if result is not None else p_curr
+
     p_unit = unit(np.asarray(start_position, dtype=np.float64))
     if p_unit is None:
         return _outcome(
@@ -770,7 +851,42 @@ def trace_uphill(
                 status = "stalled"
                 break
 
+            p_unit_prev = p_unit
             p_unit = _step(p_unit, direction, step_rad)
+
+            # DETECT BOUNDARY ENTRY: if the step crosses into an excision region,
+            # snap from the crossing point to the region centre and resume from
+            # the centre's boundary maximum, rather than spiraling in the noisy
+            # interior.
+            entry_region = _detects_boundary_entry(p_unit_prev, p_unit, excluded)
+            if entry_region is not None:
+                # Find the boundary crossing point
+                crossing = _boundary_crossing_point(p_unit_prev, p_unit, entry_region)
+
+                # Bridge from crossing to center
+                bridge = unit(
+                    entry_region.centre_unit
+                    - float(np.dot(entry_region.centre_unit, crossing)) * crossing
+                )
+                if bridge is not None:
+                    span = angular_distance(crossing, entry_region.centre_unit)
+                    n_bridge = max(1, math.ceil(span / step_rad))
+                    for k in range(1, n_bridge + 1):
+                        q = _step(crossing, bridge, span * float(k) / float(n_bridge))
+                        path.append(_emit(q * sphere_radius))
+                    steps += n_bridge
+                travelled += angular_distance(crossing, entry_region.centre_unit)
+
+                # Resume from center's boundary maximum
+                resume = _boundary_argmax(entry_region)
+                if resume is not None:
+                    p_unit = resume
+                    f_here = _f(p_unit)
+                    excluded.add(entry_region.region_id)
+                    transited.append(entry_region.region_id)
+                    # Continue to next iteration with fresh segment budget
+                    continue
+
             path.append(_emit(p_unit * sphere_radius))
             travelled += step_rad
             steps += 1

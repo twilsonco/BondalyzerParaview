@@ -526,8 +526,11 @@ def test_transit_carries_a_stall_out_of_a_region_and_arrives() -> None:
     assert bridged.status == "arrived"
     assert bridged.max_id == "MAX_0"
     assert bridged.transited_ids == ("MC_TRAP",)
-    # The transit is part of the drawn path, so the connector stays continuous.
-    assert len(bridged.path) > len(plain.path)
+    # The snap-to-entry rule bypasses the spiral entirely: it snaps at boundary
+    # entry and resumes from the center, resulting in a SHORT, efficient path.
+    # This is much better than the old spiral behavior (plain path = 401 points).
+    assert len(bridged.path) < len(plain.path)
+    assert len(bridged.path) < 50  # Efficient: snap + resume takes ~18 steps
 
 
 def test_the_port_s_own_region_is_never_transited() -> None:
@@ -944,3 +947,116 @@ def test_a_broad_peak_arrives_under_its_own_steps_and_is_not_completed() -> None
 def test_capture_pitch_is_one_mesh_step() -> None:
     """The bound is the step size, because the step is what causes the overshoot."""
     assert CAPTURE_PITCH == 1.0
+
+
+def test_snap_to_entry_detects_boundary_crossing() -> None:
+    """When an arc crosses a region boundary, it snaps to the center.
+
+    This is the new entry-detection behavior: instead of spiraling inside the
+    noisy excision region until termination, the arc snaps immediately upon entry.
+    """
+    pts = _fibonacci_sphere()
+    # A field with a smooth peak that is reachable, and an annihilated region
+    # that sits in the way
+    f = _bump_and_peak_field(pts)
+    # Start the port close to the bump so the path enters it
+    port = np.array([math.sin(math.radians(80.0)), 0.0, math.cos(math.radians(80.0))])
+    regions = _bump_region()
+
+    out = trace_uphill(
+        start_position=tuple(port),
+        targets=[_max_target(np.array([0.0, 0.0, 1.0]), radius_deg=10.0)],
+        mesh_pts=pts,
+        f_vals=f,
+        sphere_radius=_R,
+        delta_theta_mesh_rad=_PITCH,
+        center=None,
+        excision_regions=regions,
+    )
+    # Should arrive at the maximum, not stall inside the region
+    assert out.status == "arrived"
+    assert out.max_id == "MAX_0"
+    assert out.transited_ids == ("MC_TRAP",)
+    # The path should be longer than a direct path because of the snap bridge
+    assert out.n_steps > 10
+
+
+def test_snap_bridge_is_drawn_in_path() -> None:
+    """The straight-line bridge from crossing to center is included in the path.
+
+    This ensures the visualizer can draw the snap-to-center behavior, and it
+    records which region was transited.
+    """
+    pts = _fibonacci_sphere()
+    f = _bump_and_peak_field(pts)
+    port = np.array([math.sin(math.radians(80.0)), 0.0, math.cos(math.radians(80.0))])
+    regions = _bump_region()
+    region = regions[0]
+
+    out = trace_uphill(
+        start_position=tuple(port),
+        targets=[_max_target(np.array([0.0, 0.0, 1.0]), radius_deg=10.0)],
+        mesh_pts=pts,
+        f_vals=f,
+        sphere_radius=_R,
+        delta_theta_mesh_rad=_PITCH,
+        center=None,
+        excision_regions=regions,
+    )
+    assert out.status == "arrived"
+    # The transited record should name the region that was entered
+    assert len(out.transited_ids) > 0
+    assert out.transited_ids[0] == "MC_TRAP"
+    # The path should have points that lie near the center
+    path = np.asarray(out.path, dtype=np.float64)
+    center_world = region.centre_unit * _R
+    min_dist_to_center = np.min(np.linalg.norm(path - center_world, axis=1))
+    # The closest point should be within a few steps of the center
+    assert min_dist_to_center < _PITCH * _R * 3.0
+
+
+def test_snap_resumes_from_boundary_maximum() -> None:
+    """After snapping to center, the climb resumes from the boundary maximum.
+
+    This combines the snap-to-entry logic with the boundary-maximum resume logic:
+    the arc should snap at entry and then continue climbing from the boundary
+    field maximum of that center.
+    """
+    pts = _fibonacci_sphere()
+    f = _bump_and_peak_field(pts)
+    port = np.array([math.sin(math.radians(80.0)), 0.0, math.cos(math.radians(80.0))])
+    regions = _bump_region()
+    region = regions[0]
+
+    out = trace_uphill(
+        start_position=tuple(port),
+        targets=[_max_target(np.array([0.0, 0.0, 1.0]), radius_deg=10.0)],
+        mesh_pts=pts,
+        f_vals=f,
+        sphere_radius=_R,
+        delta_theta_mesh_rad=_PITCH,
+        center=None,
+        excision_regions=regions,
+    )
+    assert out.status == "arrived"
+    # The boundary's field maximum (computed independently)
+    ring = generate_boundary_ring(
+        (
+            float(region.centre_unit[0]),
+            float(region.centre_unit[1]),
+            float(region.centre_unit[2]),
+        ),
+        _R,
+        region.radius_rad,
+        RING_SAMPLES,
+    )
+    vals = [
+        float(interpolate_scalar_at_points(np.array([p.position]), pts, f)[0])
+        for p in ring
+    ]
+    argmax = np.asarray(ring[int(np.argmax(vals))].position, dtype=np.float64)
+
+    # The resumed path must pass through the boundary maximum
+    path = np.asarray(out.path, dtype=np.float64)
+    dist = np.arccos(np.clip(path @ (argmax / np.linalg.norm(argmax)), -1.0, 1.0))
+    assert math.degrees(float(dist.min())) < math.degrees(_PITCH)
