@@ -993,6 +993,53 @@ def seed_ray_direction(
     return (float(d[0]), float(d[1]), float(d[2]))
 
 
+def _saddle_to_port_arc(
+    saddle_unit: npt.NDArray[np.float64],
+    port_unit: npt.NDArray[np.float64],
+    sphere_radius: float,
+    center: tuple[float, float, float] | None,
+) -> tuple[tuple[float, float, float], ...]:
+    """Sample the geodesic bridge from saddle center to launch port.
+
+    The bridge is a great-circle arc from the saddle's effective CP center to
+    the port on its excision boundary, both in the centred atom frame. This
+    makes the full arc path visible: saddle center → (bridge) → port → (traced
+    ridge) → target, instead of only showing the ridge-traced portion.
+
+    Args:
+        saddle_unit: Unit radial of the saddle CP center, centred frame.
+        port_unit: Unit radial of the launch port, centred frame.
+        sphere_radius: Atom sphere radius.
+        center: World-frame nucleus. Output points are converted to world frame
+            if center is not None; otherwise they stay in centred frame.
+
+    Returns:
+        ARC_SAMPLES + 1 points sampled on the geodesic from saddle to port,
+        in world frame (if center given) or centred frame (if center is None).
+        Endpoints (saddle center and port) are included.
+    """
+    span = angular_distance(saddle_unit, port_unit)
+
+    def _emit(local: tuple[float, float, float]) -> tuple[float, float, float]:
+        return to_global(local, center) if center is not None else local
+
+    direction = unit(tangent_project(port_unit, saddle_unit))
+
+    if direction is None or span <= 1e-12:
+        # Degenerate: saddle and port are coincident (should not happen in
+        # practice, but handle gracefully by returning both endpoints).
+        start = _emit(radial_offset(saddle_unit, sphere_radius))
+        end = _emit(radial_offset(port_unit, sphere_radius))
+        return (start, end)
+
+    out: list[tuple[float, float, float]] = []
+    for i in range(ARC_SAMPLES + 1):
+        frac = i / ARC_SAMPLES
+        local = rotate_towards(saddle_unit, direction, span * frac, sphere_radius)
+        out.append(_emit(local))
+    return tuple(out)
+
+
 def _arc_between(
     origin_unit: npt.NDArray[np.float64],
     target_unit: npt.NDArray[np.float64],
@@ -1415,8 +1462,10 @@ def _gradient_connection(
 
     The ascent starts at ``branch.launch_position`` -- the port on the saddle's
     excision boundary -- never at the saddle centre, because the gradient vanishes
-    at a critical point and the first step would be pure noise. See
-    ``separatrix_tracer`` for the integrator.
+    at a critical point and the first step would be pure noise. The returned path
+    is prepended with a geodesic bridge from the saddle center to the port,
+    making the full trajectory visible: saddle center → port → traced ridge.
+    See ``separatrix_tracer`` for the integrator.
 
     Args:
         seed: The source saddle.
@@ -1462,9 +1511,21 @@ def _gradient_connection(
         # to its highest point and stop. Keep the ridge line and the endpoint on
         # the record so the viewer can draw them and the disagreement with the
         # topology is visible, not inferred from an empty cell.
+        # Prepend saddle-to-port bridge to the traced path for visibility.
+        port_unit = unit(np.asarray(branch.launch_position, dtype=np.float64))
+        if port_unit is not None:
+            bridge = _saddle_to_port_arc(
+                saddle_unit=centre_unit,
+                port_unit=port_unit,
+                sphere_radius=sphere_radius,
+                center=center,
+            )
+            full_path = bridge + outcome.path[1:] if outcome.path else bridge
+        else:
+            full_path = outcome.path
         return replace(
             base,
-            arc_points=outcome.path,
+            arc_points=full_path,
             stall_point=outcome.path[-1] if outcome.path else None,
             along_track_deg=outcome.arc_length_deg,
             transited_ids=outcome.transited_ids,
@@ -1477,6 +1538,18 @@ def _gradient_connection(
     hit = next((t for t in prepared if t.cp_id == outcome.max_id), None)
     if hit is None:  # pragma: no cover - the tracer only returns pool ids
         return base
+    # Prepend saddle-to-port bridge to the traced path for visibility.
+    port_unit = unit(np.asarray(branch.launch_position, dtype=np.float64))
+    if port_unit is not None:
+        bridge = _saddle_to_port_arc(
+            saddle_unit=centre_unit,
+            port_unit=port_unit,
+            sphere_radius=sphere_radius,
+            center=center,
+        )
+        full_path = bridge + outcome.path[1:] if outcome.path else bridge
+    else:
+        full_path = outcome.path
     return MaxConnection(
         saddle_id=seed.saddle_id,
         branch_index=branch.sector_index,
@@ -1489,8 +1562,9 @@ def _gradient_connection(
         mutual=False,
         # The traced ridge line IS the connector here. Flattening it to the
         # geodesic between its endpoints would erase the wrapping that made the
-        # ray rule fail, which is the finding.
-        arc_points=outcome.path,
+        # ray rule fail, which is the finding. The bridge is prepended to show
+        # the full path from saddle center through port to the target.
+        arc_points=full_path,
         saddle_value=float(seed.saddle_value),
         max_value=float(hit.value),
         verified=bool(seed.index_agrees),
