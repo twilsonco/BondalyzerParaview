@@ -1450,3 +1450,41 @@ def test_smoothing_preserves_the_degenerate_arc_audit() -> None:
     assert degenerate_arcs(smoothed_distinct) == [], (
         "resampling made two different legs look identical"
     )
+
+
+def test_gradient_path_is_prepended_with_saddle_to_port_bridge() -> None:
+    """Gradient-traced paths now show the full trajectory from saddle center to target.
+
+    When a gradient climb traces from the port uphill, the arc_points now include
+    a prepended bridge from the saddle center to the port, making the full path
+    visible. This parallels the snap-to-center behavior at the destination.
+    """
+    seed = _seed("SAD_1", [_branch(0, 0.0)])
+    # Maximum at the north pole; the port launches outward, so it's behind the ray.
+    targets = [_target("MAX_9", "maximum", 0.0, 0.0, value=1.0, disc_deg=2.0)]
+    pts, f = _mesh_and_peak((0.0, 0.0, 1.0))
+
+    conn = connect_seed_to_maxima([seed], targets, R, PITCH, mesh_pts=pts, f_vals=f)[0]
+    assert conn.status == "connected"
+    assert conn.method == "gradient"
+    assert len(conn.arc_points) >= 2
+
+    # The path should start near the saddle center (the seed position).
+    saddle_center = np.asarray(seed.saddle_position, dtype=np.float64)
+    first_point = np.asarray(conn.arc_points[0], dtype=np.float64)
+
+    # First point should be close to saddle center (within a couple of arc samples).
+    # The bridge spans from saddle (radius R) to port (also radius R), sampled into
+    # ARC_SAMPLES+1 points. The first point should be very close to the saddle.
+    distance_to_saddle = np.linalg.norm(first_point - saddle_center)
+    # The max distance from saddle to port is at most 2*R (antipodal), so first point
+    # should be very close (<< R) to the saddle.
+    assert distance_to_saddle < 0.2 * R, (
+        f"First point {distance_to_saddle} too far from saddle center"
+    )
+
+    # Verify the arc includes multiple points (bridge + ridge segments).
+    # The bridge contributes ARC_SAMPLES+1 points, so total should be well above 2.
+    assert len(conn.arc_points) > 2 * ARC_SAMPLES / 10, (
+        f"Arc too short: {len(conn.arc_points)} points, expected > {2 * ARC_SAMPLES / 10}"
+    )
