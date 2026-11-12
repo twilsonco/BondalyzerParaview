@@ -272,6 +272,8 @@ class TestRunStages:
             "basins",
             "launch",
             "connect",
+            # Minimum basins are computed from the connections topology.
+            "minimum_basins",
             # The probe runs last: it measures the traced ascent, which only exists
             # once the connect stage has produced it. In the viewer the same order
             # holds -- the probe lives in _emit_max_arcs, after the post-pass.

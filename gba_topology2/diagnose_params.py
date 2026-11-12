@@ -64,6 +64,7 @@ workspace_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if workspace_root not in sys.path:
     sys.path.insert(0, workspace_root)
 
+from gba_topology2.src.basin_boundary import find_minimum_basins
 from gba_topology2.src.basin_center import BasinCenter, extract_basin_centers
 from gba_topology2.src.catastrophe_classifier import (
     EffectiveCatastrophe,
@@ -248,6 +249,8 @@ class RunContext:
     #: parameter sets over the whole run.
     probe_all: bool = False
     connection_pool: list[ConnectionTarget] = field(default_factory=list)
+    #: Minimum basin boundaries computed from connections.
+    minimum_basins: dict[str, Any] = field(default_factory=dict)
 
     def require_morse(self) -> MorseDetectionResult:
         """Return the Morse result, requiring the morse stage to have run.
@@ -969,6 +972,36 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
     return stats
 
 
+def stage_minimum_basins(ctx: RunContext) -> dict[str, Any]:
+    """Compute minimum basin boundaries from the connection topology.
+
+    Uses the verified connections to detect cycles that enclose each minimum CP.
+    Each basin boundary is an ordered cycle of arcs (MaxConnection objects) that
+    forms a closed path enclosing a minimum in the connection graph.
+
+    Returns:
+        Summary of the basin detection, including count of detected basins.
+    """
+    if not ctx.connections:
+        ctx.minimum_basins = {}
+        return {"n_minimum_basins": 0}
+
+    try:
+        ctx.minimum_basins = find_minimum_basins(
+            ctx.connections,
+            ctx.basin_centers,
+        )
+    except (ValueError, Exception) as e:
+        # Topology error or malformed data; use empty dict
+        ctx.minimum_basins = {}
+        return {
+            "n_minimum_basins": 0,
+            "error": str(e),
+        }
+
+    return {"n_minimum_basins": len(ctx.minimum_basins)}
+
+
 def stage_probe(ctx: RunContext) -> dict[str, Any]:
     """Step 3 "Step 3 CP Probing": measure the ridge beside each traced ascent.
 
@@ -1082,6 +1115,7 @@ STAGES: list[tuple[str, Callable[[RunContext], dict[str, Any]]]] = [
     ("basins", stage_basins),
     ("launch", stage_launch),
     ("connect", stage_connect),
+    ("minimum_basins", stage_minimum_basins),
     ("probe", stage_probe),
 ]
 
