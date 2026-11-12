@@ -145,6 +145,10 @@ DEFAULT_UI_STATE: dict[str, Any] = {
     # path's shape, not a shift across it. Off by default; it costs one disc fit per
     # sample on the visible paths only.
     "probe_ridge_points": False,
+    # Minimum basin boundaries: visualization of closed cycles enclosing each
+    # minimum CP in the connection topology. Show individual minimum or all at once.
+    "show_basin_for_selected_minimum": False,
+    "show_all_minimum_basins": False,
 }
 
 # Schema version of the JSON file written by the "Save Parameters" button.

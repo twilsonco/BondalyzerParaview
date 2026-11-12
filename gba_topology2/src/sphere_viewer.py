@@ -3755,10 +3755,18 @@ def run_sphere_viewer(
         "refine_ridge_paths",
         "coarse_ridge_curves",
         "probe_ridge_points",
+        "show_basin_for_selected_minimum",
+        "show_all_minimum_basins",
     )
     def on_param_change(**kwargs: Any) -> None:
         if suppress_param_change:
             return
+        # Check if basin toggles changed; if so, update basin visualization
+        if (
+            "show_basin_for_selected_minimum" in kwargs
+            or "show_all_minimum_basins" in kwargs
+        ):
+            compute_and_show_basin(state.selected_minimum_id)
         update_field()
 
     @ctrl.add("reset_defaults")
@@ -5507,6 +5515,24 @@ def run_sphere_viewer(
                             v_model=("probe_ridge_points",),
                             density="compact",
                             color="grey",
+                            hide_details=True,
+                            classes="mb-1",
+                        )
+                        # Minimum basin boundaries: closed cycles enclosing each
+                        # minimum CP. Show individual minimum or all at once.
+                        v3.VSwitch(
+                            label="Show Basin Boundary For Selected Minimum",
+                            v_model=("show_basin_for_selected_minimum",),
+                            density="compact",
+                            color="green",
+                            hide_details=True,
+                            classes="mb-1",
+                        )
+                        v3.VSwitch(
+                            label="Show All Minimum Basin Boundaries",
+                            v_model=("show_all_minimum_basins",),
+                            density="compact",
+                            color="green",
                             hide_details=True,
                             classes="mb-1",
                         )
