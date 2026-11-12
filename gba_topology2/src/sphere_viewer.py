@@ -3558,6 +3558,12 @@ def run_sphere_viewer(
         # the branches arriving at it, naming a saddle shows those leaving it.
         # Selecting one clears the other so the drawer table and the scene agree.
         state.selected_saddle_id = None
+        # Update selected_minimum_id so basin boundary toggles can find the right basin
+        state.selected_minimum_id = (
+            basin_item["id"]
+            if basin_item is not None and basin_item.get("polarity") == "minimum"
+            else None
+        )
         if basin_item is None:
             basin_center_actor.SetVisibility(False)
         else:
@@ -3572,6 +3578,9 @@ def run_sphere_viewer(
             if basin_item is not None and basin_item.get("polarity") == "maximum"
             else None
         )
+        # Trigger basin visualization if "Show Basin Boundary For Selected Minimum" is enabled
+        if state.show_basin_for_selected_minimum:
+            compute_and_show_basin(state.selected_minimum_id)
         render_window.Render()
         request_view_update()
 
