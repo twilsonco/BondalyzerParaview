@@ -313,23 +313,32 @@ def test_v6_snapshot_replays_the_fidelity_smoother_not_the_coarse_curve() -> Non
     assert DEFAULT_UI_STATE["coarse_ridge_curves"] is False
 
 
-def test_current_version_stays_strict_about_missing_controls() -> None:
-    """The tolerance is for legacy files only, never for the current version."""
+def test_current_version_uses_defaults_for_missing_controls() -> None:
+    """Missing parameters fall back to defaults, enabling forward compatibility.
+
+    When a new parameter is added to a feature (like show_all_minimum_basins),
+    old parameter files saved before the feature was added should still load.
+    Missing parameters take their defaults from DEFAULT_UI_STATE.
+    """
     payload = _export()
     assert payload["schema_version"] == PARAMS_SCHEMA_VERSION
     del payload["params"]["bools"]["show_max_saddle_arcs"]
 
-    with pytest.raises(KeyError, match="show_max_saddle_arcs"):
-        load_params_from_dict(payload)
+    params = load_params_from_dict(payload)
+    assert params["show_max_saddle_arcs"] is DEFAULT_UI_STATE["show_max_saddle_arcs"]
 
 
-def test_load_requires_every_control_key() -> None:
-    """Dropping any control key raises KeyError naming the key."""
+def test_load_missing_control_key_uses_default() -> None:
+    """Missing control keys are filled from DEFAULT_UI_STATE.
+
+    This enables old parameter files (saved before a new feature was added)
+    to load successfully by using the default value for missing parameters.
+    """
     payload = _export()
     del payload["params"]["floats"]["k_bridge"]
 
-    with pytest.raises(KeyError, match="k_bridge"):
-        load_params_from_dict(payload)
+    params = load_params_from_dict(payload)
+    assert params["k_bridge"] == DEFAULT_UI_STATE["k_bridge"]
 
 
 def test_load_rejects_bool_for_slider_and_number_for_toggle() -> None:

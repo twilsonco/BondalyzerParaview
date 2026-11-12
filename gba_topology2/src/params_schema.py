@@ -588,18 +588,16 @@ def load_params_from_dict(payload: dict[str, Any]) -> dict[str, Any]:
         out: dict[str, Any] = {}
         for key in keys:
             if key not in section:
-                # A legacy snapshot predates the control, so the control had a
-                # known value: its default. Filling it keeps an old observation
-                # reproducible instead of unreadable.
-                if not strict and key in DEFAULT_UI_STATE:
+                # A snapshot predates the control (either from an older schema
+                # version or an older file from the current version), so the
+                # control had a known value: its default. Filling it keeps an
+                # old observation reproducible instead of unreadable.
+                if key in DEFAULT_UI_STATE:
                     out[key] = DEFAULT_UI_STATE[key]
                     continue
-                if not strict:
-                    raise ValueError(
-                        f"Legacy params schema_version {version!r} is missing "
-                        f"'{key}' from section '{name}' and no default exists"
-                    )
-                raise KeyError(f"Missing parameter '{key}' in section '{name}'")
+                raise ValueError(
+                    f"Params section '{name}' is missing '{key}' and no default exists"
+                )
             out[key] = coerce(key, section[key])
         return out
 
