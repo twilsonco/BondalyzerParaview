@@ -64,7 +64,10 @@ workspace_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if workspace_root not in sys.path:
     sys.path.insert(0, workspace_root)
 
-from gba_topology2.src.basin_boundary import find_minimum_basins
+from gba_topology2.src.basin_boundary import (
+    build_connection_graph,
+    find_minimum_basins,
+)
 from gba_topology2.src.basin_center import BasinCenter, extract_basin_centers
 from gba_topology2.src.catastrophe_classifier import (
     EffectiveCatastrophe,
@@ -251,6 +254,7 @@ class RunContext:
     connection_pool: list[ConnectionTarget] = field(default_factory=list)
     #: Minimum basin boundaries computed from connections.
     minimum_basins: dict[str, Any] = field(default_factory=dict)
+    connection_graph: dict[str, list[Any]] = field(default_factory=dict)
 
     def require_morse(self) -> MorseDetectionResult:
         """Return the Morse result, requiring the morse stage to have run.
@@ -984,9 +988,12 @@ def stage_minimum_basins(ctx: RunContext) -> dict[str, Any]:
     """
     if not ctx.connections:
         ctx.minimum_basins = {}
+        ctx.connection_graph = {}
         return {"n_minimum_basins": 0}
 
     try:
+        # Build the graph for diagnostics
+        ctx.connection_graph = build_connection_graph(ctx.connections)
         ctx.minimum_basins = find_minimum_basins(
             ctx.connections,
             ctx.basin_centers,
@@ -994,12 +1001,34 @@ def stage_minimum_basins(ctx: RunContext) -> dict[str, Any]:
     except (ValueError, Exception) as e:
         # Topology error or malformed data; use empty dict
         ctx.minimum_basins = {}
+        ctx.connection_graph = {}
         return {
             "n_minimum_basins": 0,
             "error": str(e),
         }
 
-    return {"n_minimum_basins": len(ctx.minimum_basins)}
+    # Build detailed diagnostics
+    summary: dict[str, Any] = {"n_minimum_basins": len(ctx.minimum_basins)}
+    if ctx.minimum_basins:
+        summary["minima_with_boundaries"] = [
+            {
+                "minimum_id": basin.minimum_id,
+                "n_boundary_arcs": len(basin.boundary_arcs),
+                "boundary_saddles": list(
+                    {arc.saddle_id for arc in basin.boundary_arcs}
+                ),
+                "boundary_maxima": list(
+                    {arc.max_id for arc in basin.boundary_arcs if arc.max_id}
+                ),
+            }
+            for basin in ctx.minimum_basins.values()
+        ]
+    if ctx.connection_graph:
+        summary["n_saddles_in_graph"] = len(ctx.connection_graph)
+        summary["n_saddle_to_max_arcs"] = sum(
+            len(conns) for conns in ctx.connection_graph.values()
+        )
+    return summary
 
 
 def stage_probe(ctx: RunContext) -> dict[str, Any]:
@@ -1525,6 +1554,20 @@ def dump_results(ctx: RunContext, path: str) -> None:
                 ],
             }
             for min_id, basin in ctx.minimum_basins.items()
+        }
+    # Add connection graph for diagnostics
+    if ctx.connection_graph:
+        payload["connection_graph"] = {
+            saddle_id: [
+                {
+                    "max_id": conn.max_id,
+                    "branch_index": conn.branch_index,
+                    "status": conn.status,
+                    "verified": conn.verified,
+                }
+                for conn in conns
+            ]
+            for saddle_id, conns in ctx.connection_graph.items()
         }
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2, sort_keys=True)
