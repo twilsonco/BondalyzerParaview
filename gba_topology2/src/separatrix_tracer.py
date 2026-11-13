@@ -151,6 +151,7 @@ __all__ = [
     "TraceTarget",
     "centred_targets",
     "excision_regions",
+    "trace_downhill",
     "trace_uphill",
 ]
 
@@ -1010,3 +1011,86 @@ def trace_uphill(
         # No budget check here: the budget is per climb segment (see above) and
         # the resume count bounds the whole trace, so the loop starts the next
         # climb from the boundary's high side with a fresh allowance.
+
+
+def trace_downhill(
+    start_position: tuple[float, float, float] | npt.NDArray[np.float64],
+    targets: Sequence[ConnectionTarget],
+    mesh_pts: npt.NDArray[np.float64],
+    f_vals: npt.NDArray[np.float64],
+    sphere_radius: float,
+    delta_theta_mesh_rad: float,
+    center: tuple[float, float, float] | None = None,
+    find_k_nearest: KNearestFinder | None = None,
+    step_pitch: float = TRACE_STEP_PITCH,
+    max_arc_pitch: float = MAX_TRACE_ARC_PITCH,
+    stall_patience: int = STALL_PATIENCE,
+    capture_pitch: float | None = None,
+    excision_regions: Sequence[ExcisionRegion] = (),
+) -> TraceOutcome:
+    """Descend the field from a launch port until a minimum is reached.
+
+    The descent IS the ascent of the negated field: minima of ``f`` are maxima
+    of ``-f``, so this wrapper climbs ``-f`` through :func:`trace_uphill` and
+    inherits the whole integrator -- step, budget, stall patience, the TOTAL
+    completion, the excision transit rule -- with no second copy of any of it.
+    One meaning shifts on the negated view: ``status == "stalled"`` reads "the
+    field stopped FALLING" (a plateau, not a peak), which is the same
+    integrator fact ``trace_uphill`` reports on the raw field.
+
+    Args:
+        start_position: The launch port, in the centred atom frame. Typically
+            ``LaunchBranch.launch_position`` of a DESCENT branch.
+        targets: The pool, in the CENTRED frame with unit-radial positions --
+            build with :func:`centred_targets`. The polarity test is flipped
+            for the negated view: entries whose polarity is ``"minimum"``
+            become the arrival tests (the wells of ``f`` are the peaks of
+            ``-f``); original maxima are relabelled so the climb cannot arrive
+            on them (they are obstacles on a descent, recorded in
+            ``visited_ids`` when the path crosses their discs), and saddles
+            keep the visit-not-arrive semantics they have in the ascent.
+        mesh_pts: (N, 3) mesh vertices, centred frame.
+        mesh_pts: (N, 3) mesh vertices, centred frame.
+        f_vals: (N,) condensed field values on those vertices. Negated here,
+            once, for the climb.
+        sphere_radius: Atom sphere radius R.
+        delta_theta_mesh_rad: Intrinsic angular mesh pitch.
+        center: World-frame nucleus, used to emit the path in world coordinates.
+        find_k_nearest: Spatial index over ``mesh_pts``.
+        step_pitch: Descent step in mesh-pitch units.
+        max_arc_pitch: Cumulative arc-length budget in mesh-pitch units.
+        stall_patience: Consecutive non-falling steps before the descent stalls.
+        capture_pitch: Completion reach, in mesh pitches (None = TOTAL; see
+            :func:`trace_uphill`).
+        excision_regions: Noisy discs the descent may cross but must not END
+            inside.
+
+    Returns:
+        A :class:`TraceOutcome`. ``status == "arrived"`` sets ``max_id`` to the
+        MINIMUM whose disc the path entered -- the field keeps the ascent's
+        name, the polarity that gives it meaning is the function used.
+        ``start_value``/``end_value`` are values of the NEGATED field.
+    """
+    flipped = [
+        replace(t, polarity="maximum")
+        if t.polarity == "minimum"
+        else replace(t, polarity="minimum")
+        if t.polarity == "maximum"
+        else t
+        for t in targets
+    ]
+    return trace_uphill(
+        start_position,
+        flipped,
+        mesh_pts,
+        -np.asarray(f_vals, dtype=np.float64),
+        sphere_radius,
+        delta_theta_mesh_rad,
+        center=center,
+        find_k_nearest=find_k_nearest,
+        step_pitch=step_pitch,
+        max_arc_pitch=max_arc_pitch,
+        stall_patience=stall_patience,
+        capture_pitch=capture_pitch,
+        excision_regions=excision_regions,
+    )
