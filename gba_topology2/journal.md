@@ -3903,3 +3903,41 @@ arcs each, all around MAX_4864 -- the three minima of this field share one basin
 `gba_topology2/` + `tests/` -- repo-wide `ruff format .` churns the legacy `BondalyzerParaView/`
 and `gba_topology/` dirs, which are not formatted to this standard; those edits were reverted via
 stash). pytest: 686 passed, 1 skipped.
+
+## 2026-11-13 — The null that ate the basin graph (schema v9 fallout, fix)
+
+Commit range: this entry + fix. Files: `src/basin_boundary.py`
+(`connection_from_state_dict`), `src/sphere_viewer.py` (reconstruction block
+replaced), `tests/test_basin_boundary.py` (+10 tests, ethene3 replay fixture).
+
+The v9 export did its job: the user's saved params showed
+`connection_graph: {}` + `minimum_basins: {}` beside a full four-row
+`max_connections_list` — the arcs exist, the graph built from them does not.
+Replaying the viewer's dict→`MaxConnection` reconstruction headlessly on the
+actual saved rows reproduced it: every row carries `"cross_track_deg": null`
+(None is the DOCUMENTED value for "the geodesic ray hit nothing"), the
+hand-written `float(conn_dict.get("cross_track_deg", 0.0))` runs `float(None)`
+— `.get`'s default fires only on MISSING keys, not on present nulls — and the
+per-row `except (KeyError, ValueError, TypeError): pass` swallows all four
+arcs. Empty conn_objs → empty graph → cached `{}` → no rings. "Show Arcs From
+Selected Maximum" renders the dicts directly, so it kept working; only the
+path that needs typed objects died, silently.
+
+Fix: `connection_from_state_dict(d)` — one rehydrator driven by
+`dataclasses.fields(MaxConnection)` + `get_type_hints`, so it cannot drift
+from the dataclass. Contract: present-null on an Optional field passes
+through (null is data); null/missing on a defaulted field gets the default;
+null/missing on a required non-Optional raises. The caller logs dropped rows
+per-row (`[sphere_viewer] basin topology: dropped arc ...`) — silent drops
+were the second bug; a 4-of-4 reconstruction failure must be louder than an
+empty field.
+
+Gotcha found by the tests: `get_args(tuple[tuple[float,float,float], ...])`
+is `(tuple[float,float,float], Ellipsis)` — taking args[0] as the base type
+coerces arc_points as a flat stall_point. Only treat `X | None` unions as
+Optional (origin `UnionType`/`Union`); plain annotations keep their outer
+type as base.
+
+Replay test is the user's screen as a test: the four saved ethene3 rows
+(arc polylines trimmed, endpoints kept) + four CP rows → 4 arcs → 2-saddle
+graph → 3 basins × 4 boundary arcs around MAX_4864.

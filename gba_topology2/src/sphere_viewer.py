@@ -76,6 +76,7 @@ from BondalyzerParaView.plt_gba_to_vtm import extract_gba_zones_from_plt
 from BondalyzerParaView.trame_viewer import get_display_title, get_robust_scalar_bounds
 from gba_topology2.src.basin_boundary import (
     build_connection_graph,
+    connection_from_state_dict,
     find_minimum_basins,
     get_basin_arcs,
     serialize_connection_graph,
@@ -4154,89 +4155,25 @@ def run_sphere_viewer(
             connections = _state_list(
                 state.max_connections_list, "max_connections_list"
             )
-            # Convert dicts back to MaxConnection objects for processing
+            # Convert dicts back to MaxConnection objects for processing.
+            # The rehydrator is dataclass-driven and None-safe: a stored null
+            # on an Optional field (cross_track_deg = "nothing was hit") is a
+            # legitimate value, and the hand-written float(get(...)) it
+            # replaced turned every such row into a swallowed TypeError —
+            # silently emptying the arc table so no basin rings existed.
             conn_objs: list[MaxConnection] = []
             for conn_dict in connections:
-                # Reconstruct MaxConnection from dict representation
-                # (max_connections_list contains dicts with all MaxConnection fields)
                 try:
-                    conn_objs.append(
-                        MaxConnection(
-                            saddle_id=str(conn_dict.get("saddle_id", "")),
-                            branch_index=int(conn_dict.get("branch_index", 0)),
-                            max_id=(
-                                str(conn_dict["max_id"])
-                                if conn_dict.get("max_id")
-                                else None
-                            ),
-                            status=str(conn_dict.get("status", "")),
-                            direction_mode=str(conn_dict.get("direction_mode", "")),
-                            cross_track_deg=float(
-                                conn_dict.get("cross_track_deg", 0.0)
-                            ),
-                            along_track_deg=float(
-                                conn_dict.get("along_track_deg", 0.0)
-                            ),
-                            separation_deg=float(conn_dict.get("separation_deg", 0.0)),
-                            mutual=bool(conn_dict.get("mutual", False)),
-                            arc_points=tuple(
-                                tuple(p)  # type: ignore
-                                for p in conn_dict.get("arc_points", [])
-                            ),
-                            saddle_value=float(conn_dict.get("saddle_value", 0.0)),
-                            max_value=(
-                                float(conn_dict["max_value"])
-                                if conn_dict.get("max_value") is not None
-                                else None
-                            ),
-                            verified=bool(conn_dict.get("verified", False)),
-                            blocker_id=(
-                                str(conn_dict["blocker_id"])
-                                if conn_dict.get("blocker_id")
-                                else None
-                            ),
-                            blocker_polarity=(
-                                str(conn_dict["blocker_polarity"])
-                                if conn_dict.get("blocker_polarity")
-                                else None
-                            ),
-                            method=str(conn_dict.get("method", "geodesic")),
-                            failure_gate=(
-                                str(conn_dict["failure_gate"])
-                                if conn_dict.get("failure_gate")
-                                else None
-                            ),
-                            stall_point=(
-                                tuple(conn_dict["stall_point"])  # type: ignore
-                                if conn_dict.get("stall_point")
-                                else None
-                            ),
-                            transited_ids=tuple(
-                                str(id_) for id_ in conn_dict.get("transited_ids", [])
-                            ),
-                            completed_leg_deg=(
-                                float(conn_dict["completed_leg_deg"])
-                                if conn_dict.get("completed_leg_deg") is not None
-                                else None
-                            ),
-                            refined=bool(conn_dict.get("refined", False)),
-                            refine_max_shift_deg=float(
-                                conn_dict.get("refine_max_shift_deg", 0.0)
-                            ),
-                            n_corners=int(conn_dict.get("n_corners", 0)),
-                            n_runs=int(conn_dict.get("n_runs", 0)),
-                            n_nodes=int(conn_dict.get("n_nodes", 0)),
-                            total_turn_before_deg=float(
-                                conn_dict.get("total_turn_before_deg", 0.0)
-                            ),
-                            total_turn_after_deg=float(
-                                conn_dict.get("total_turn_after_deg", 0.0)
-                            ),
-                        )
+                    conn_objs.append(connection_from_state_dict(conn_dict))
+                except (KeyError, ValueError, TypeError) as exc:
+                    # Loud, per-row: a dropped arc changes the topology, and
+                    # a silent drop made a 4-of-4 failure look like a field
+                    # with no connections at all.
+                    print(
+                        "[sphere_viewer] basin topology: dropped arc "
+                        f"{conn_dict.get('saddle_id', '?')}"
+                        f"[{conn_dict.get('branch_index', '?')}]: {exc}"
                     )
-                except (KeyError, ValueError, TypeError):
-                    # Skip malformed entries
-                    pass
 
             # Get basin centers
             basin_centers_dicts = _state_list(

@@ -1,10 +1,14 @@
 """Tests for gba_topology2.src.basin_boundary module."""
 
+from dataclasses import asdict
+from typing import Any
+
 import pytest
 
 from gba_topology2.src.basin_boundary import (
     MinimumBasin,
     build_connection_graph,
+    connection_from_state_dict,
     find_minimum_basins,
     get_basin_arcs,
     serialize_connection_graph,
@@ -366,3 +370,317 @@ class TestSerializeMinimumBasins:
         )
         out = serialize_minimum_basins({"MIN_1": basin})
         assert json.loads(json.dumps(out)) == out
+
+
+_ETHENE3_ARC_ROWS: list[dict[str, Any]] = [
+    {
+        "along_track_deg": 170.94861716936637,
+        "arc_points": [
+            (1.4904, 0.3435, -0.0003),
+            (1.4917, 0.3426, -0.0101),
+            (0.8491, -0.0002, -0.0075),
+        ],
+        "blocker_id": None,
+        "blocker_polarity": None,
+        "branch_index": 0,
+        "completed_leg_deg": None,
+        "cross_track_deg": None,
+        "direction_mode": "port_tangent",
+        "failure_gate": "cone",
+        "max_id": "MAX_4864",
+        "max_value": 0.5798894166946411,
+        "method": "gradient",
+        "mutual": False,
+        "n_corners": 1,
+        "n_nodes": 15,
+        "n_runs": 0,
+        "refine_max_shift_deg": 2.4404450377844404,
+        "refined": True,
+        "saddle_id": "E-SAD_MS3",
+        "saddle_value": 0.0012506436323747039,
+        "separation_deg": 123.63428869026909,
+        "stall_point": None,
+        "status": "connected",
+        "total_turn_after_deg": 284.4426885335097,
+        "total_turn_before_deg": 1189.4082906317901,
+        "transited_ids": ["MS1", "MC12"],
+        "verified": True,
+    },
+    {
+        "along_track_deg": 167.61462268464416,
+        "arc_points": [
+            (1.4904, 0.3435, -0.0003),
+            (1.4914, 0.3428, 0.0084),
+            (0.8491, -0.0002, -0.0075),
+        ],
+        "blocker_id": None,
+        "blocker_polarity": None,
+        "branch_index": 1,
+        "completed_leg_deg": None,
+        "cross_track_deg": None,
+        "direction_mode": "port_tangent",
+        "failure_gate": "cone",
+        "max_id": "MAX_4864",
+        "max_value": 0.5798894166946411,
+        "method": "gradient",
+        "mutual": False,
+        "n_corners": 0,
+        "n_nodes": 14,
+        "n_runs": 0,
+        "refine_max_shift_deg": 2.2929171954928997,
+        "refined": True,
+        "saddle_id": "E-SAD_MS3",
+        "saddle_value": 0.0012506436323747039,
+        "separation_deg": 123.63428869026909,
+        "stall_point": None,
+        "status": "connected",
+        "total_turn_after_deg": 145.11386433029045,
+        "total_turn_before_deg": 873.2105168569078,
+        "transited_ids": ["MC2", "MC12"],
+        "verified": True,
+    },
+    {
+        "along_track_deg": 170.66211670144577,
+        "arc_points": [
+            (1.4903, -0.3438, -0.0003),
+            (1.4908, -0.3434, -0.0091),
+            (0.8491, -0.0002, -0.0075),
+        ],
+        "blocker_id": None,
+        "blocker_polarity": None,
+        "branch_index": 0,
+        "completed_leg_deg": None,
+        "cross_track_deg": None,
+        "direction_mode": "port_tangent",
+        "failure_gate": "cone",
+        "max_id": "MAX_4864",
+        "max_value": 0.5798894166946411,
+        "method": "gradient",
+        "mutual": False,
+        "n_corners": 2,
+        "n_nodes": 16,
+        "n_runs": 0,
+        "refine_max_shift_deg": 2.6804817978444806,
+        "refined": True,
+        "saddle_id": "E-SAD_MS4",
+        "saddle_value": 0.0012494416441768408,
+        "separation_deg": 123.57676361564958,
+        "stall_point": None,
+        "status": "connected",
+        "total_turn_after_deg": 381.1555452439809,
+        "total_turn_before_deg": 1306.827600208038,
+        "transited_ids": ["MS1", "MC12"],
+        "verified": True,
+    },
+    {
+        "along_track_deg": 163.9978769354392,
+        "arc_points": [
+            (1.4903, -0.3438, -0.0003),
+            (1.4908, -0.3434, 0.0085),
+            (0.8491, -0.0002, -0.0075),
+        ],
+        "blocker_id": None,
+        "blocker_polarity": None,
+        "branch_index": 1,
+        "completed_leg_deg": None,
+        "cross_track_deg": None,
+        "direction_mode": "port_tangent",
+        "failure_gate": "cone",
+        "max_id": "MAX_4864",
+        "max_value": 0.5798894166946411,
+        "method": "gradient",
+        "mutual": False,
+        "n_corners": 1,
+        "n_nodes": 14,
+        "n_runs": 0,
+        "refine_max_shift_deg": 2.5206387557526777,
+        "refined": True,
+        "saddle_id": "E-SAD_MS4",
+        "saddle_value": 0.0012494416441768408,
+        "separation_deg": 123.57676361564958,
+        "stall_point": None,
+        "status": "connected",
+        "total_turn_after_deg": 164.5792706175673,
+        "total_turn_before_deg": 832.1394066511576,
+        "transited_ids": ["MC2", "MC12"],
+        "verified": True,
+    },
+]
+
+
+_ETHENE3_BASIN_CENTERS: list[dict[str, Any]] = [
+    {
+        "id": "MAX_4864",
+        "polarity": "maximum",
+        "position": [0.8472, -0.0002, 0.0143],
+        "value": 0.579889,
+        "is_effective": False,
+        "vertex_id": 4864,
+        "origin_id": None,
+        "net_index": 1,
+        "member_count": 1,
+        "badge_color": "error",
+    },
+    {
+        "id": "E-MIN_MC3",
+        "polarity": "minimum",
+        "position": [1.6745, -0.0001, -0.0003],
+        "value": 0.000498,
+        "is_effective": True,
+        "vertex_id": -1,
+        "origin_id": "MC3",
+        "net_index": 1,
+        "member_count": 5,
+        "badge_color": "info",
+    },
+    {
+        "id": "MIN_5070",
+        "polarity": "minimum",
+        "position": [1.0586, -0.3604, -0.0003],
+        "value": 0.000254,
+        "is_effective": False,
+        "vertex_id": 5070,
+        "origin_id": None,
+        "net_index": 1,
+        "member_count": 1,
+        "badge_color": "info",
+    },
+    {
+        "id": "MIN_5011",
+        "polarity": "minimum",
+        "position": [1.0586, 0.3604, -0.0003],
+        "value": 0.000253,
+        "is_effective": False,
+        "vertex_id": 5011,
+        "origin_id": None,
+        "net_index": 1,
+        "member_count": 1,
+        "badge_color": "info",
+    },
+]
+
+
+def _minimal_conn_row(**overrides: Any) -> dict[str, Any]:
+    """A complete required-fields row in the viewer's state-dict shape."""
+    row: dict[str, Any] = {
+        "saddle_id": "SAD_1",
+        "branch_index": 0,
+        "max_id": "MAX_1",
+        "status": "connected",
+        "direction_mode": "ray",
+        "cross_track_deg": 1.5,
+        "along_track_deg": 10.0,
+        "separation_deg": 12.0,
+        "mutual": True,
+        "arc_points": [[0.0, 0.0, 1.0], [0.7, 0.0, 0.7], [1.0, 0.0, 0.0]],
+        "saddle_value": 0.5,
+        "max_value": 1.0,
+        "verified": True,
+    }
+    row.update(overrides)
+    return row
+
+
+class TestConnectionFromStateDict:
+    """None-safe rehydration of MaxConnection from state/params dicts.
+
+    The schema-v9 regression: rows saved with ``"cross_track_deg": null`` fed
+    ``float(None)`` in the viewer's hand-written reconstruction, the per-row
+    ``except`` swallowed the TypeError, and the ENTIRE arc table vanished —
+    empty graph, no basin rings. The dataclass-driven rehydrator must keep
+    legitimate nulls and never drop a well-formed row.
+    """
+
+    def test_round_trip_from_dataclass(self) -> None:
+        """asdict(conn) rehydrates to an equal object."""
+        conn = _make_connection("SAD_1", "MAX_1")
+        assert connection_from_state_dict(asdict(conn)) == conn
+
+    def test_null_optional_fields_pass_through(self) -> None:
+        """A stored null on an Optional field stays None — it is data, not dirt.
+
+        cross_track_deg is None for a branch whose geodesic ray hit nothing;
+        coercing it to 0.0 would forge a perfect cross-track measurement.
+        """
+        row = _minimal_conn_row(
+            cross_track_deg=None,
+            stall_point=None,
+            completed_leg_deg=None,
+            blocker_id=None,
+            blocker_polarity=None,
+            failure_gate=None,
+        )
+        conn = connection_from_state_dict(row)
+        assert conn.cross_track_deg is None
+        assert conn.stall_point is None
+        assert conn.completed_leg_deg is None
+        assert conn.blocker_id is None
+        assert conn.failure_gate is None
+
+    def test_null_with_default_gets_default(self) -> None:
+        """None on a defaulted non-Optional field falls back to the default."""
+        conn = connection_from_state_dict(
+            _minimal_conn_row(refine_max_shift_deg=None, n_corners=None, method=None)
+        )
+        assert conn.refine_max_shift_deg == 0.0
+        assert conn.n_corners == 0
+        assert conn.method == "geodesic"
+
+    def test_missing_keys_use_defaults(self) -> None:
+        """A v8-era row lacking the tail fields reconstructs with defaults."""
+        row = _minimal_conn_row()
+        conn = connection_from_state_dict(row)
+        assert conn.refined is False
+        assert conn.transited_ids == ()
+        assert conn.n_nodes == 0
+
+    def test_required_field_none_raises(self) -> None:
+        """None for a required non-Optional field is malformed, not defaulted."""
+        with pytest.raises(TypeError):
+            connection_from_state_dict(_minimal_conn_row(saddle_id=None))
+        with pytest.raises(TypeError):
+            connection_from_state_dict(_minimal_conn_row(saddle_value=None))
+
+    def test_uncoercible_value_raises(self) -> None:
+        """A present value of the wrong shape raises, so the caller can log it."""
+        with pytest.raises(ValueError):
+            connection_from_state_dict(_minimal_conn_row(branch_index="x"))
+
+    def test_ethene3_rows_rehydrate_and_form_basins(self) -> None:
+        """The four real saved arcs (cross_track_deg null) form 3 basin rings.
+
+        Fixture: ethene3 atom 1, the exact max_connections_list and
+        basin_centers_list rows from ethene3_atom1_params.json (arc polylines
+        trimmed to endpoints; endpoints preserved). This is the user's screen
+        as a test: the same data that rendered nothing under the old code.
+        """
+        conn_objs = [connection_from_state_dict(row) for row in _ETHENE3_ARC_ROWS]
+        assert len(conn_objs) == 4
+
+        graph = build_connection_graph(conn_objs)
+        assert set(graph) == {"E-SAD_MS3", "E-SAD_MS4"}
+        assert sum(len(v) for v in graph.values()) == 4
+
+        basin_centers = [
+            BasinCenter(
+                center_id=str(bc["id"]),
+                polarity=str(bc["polarity"]),
+                position=tuple(bc["position"]),
+                value=float(bc["value"]),
+                is_effective=bool(bc["is_effective"]),
+                vertex_id=int(bc["vertex_id"]),
+                origin_id=bc["origin_id"],
+                net_index=int(bc["net_index"]),
+                member_count=int(bc["member_count"]),
+            )
+            for bc in _ETHENE3_BASIN_CENTERS
+        ]
+        basins = find_minimum_basins(conn_objs, basin_centers)
+        assert set(basins) == {"E-MIN_MC3", "MIN_5070", "MIN_5011"}
+        for basin in basins.values():
+            assert len(basin.boundary_arcs) == 4
+            assert {a.saddle_id for a in basin.boundary_arcs} == {
+                "E-SAD_MS3",
+                "E-SAD_MS4",
+            }
+            assert {a.max_id for a in basin.boundary_arcs} == {"MAX_4864"}

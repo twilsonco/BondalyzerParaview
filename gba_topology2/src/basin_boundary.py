@@ -5,8 +5,10 @@ each minimum in the Morse-Smale complex. A minimum's basin boundary consists of
 the connections from saddles that are spatially adjacent to the minimum.
 """
 
-from dataclasses import dataclass
-from typing import Any
+from collections.abc import Mapping
+from dataclasses import MISSING, dataclass, fields
+from types import UnionType
+from typing import Any, Union, get_args, get_origin, get_type_hints
 
 from gba_topology2.src.basin_center import BasinCenter
 from gba_topology2.src.max_connection import MaxConnection
@@ -14,11 +16,91 @@ from gba_topology2.src.max_connection import MaxConnection
 __all__ = [
     "MinimumBasin",
     "build_connection_graph",
+    "connection_from_state_dict",
     "find_minimum_basins",
     "get_basin_arcs",
     "serialize_connection_graph",
     "serialize_minimum_basins",
 ]
+
+
+def connection_from_state_dict(d: Mapping[str, Any]) -> MaxConnection:
+    """Rehydrate a :class:`MaxConnection` from its state/params dict form.
+
+    The viewer's basin pipeline receives ``state.max_connections_list`` rows
+    (JSON-safe dicts written by ``max_to_dict``) and must rebuild the typed
+    objects. Hand-written per-field coercion is what broke in schema v9:
+    a row carrying ``"cross_track_deg": null`` fed ``float(None)``, the
+    per-row ``except`` swallowed the ``TypeError``, and the whole arc table
+    vanished from the basin computation. This function is driven by the
+    dataclass itself, so it cannot drift from it, and it honours the field
+    contract: **None is a legitimate stored value for an Optional field**
+    (``cross_track_deg: None`` means "nothing was hit") and is passed
+    through unchanged; None/missing for a field with a default gets the
+    default; None/missing for a required non-Optional field raises.
+
+    Args:
+        d: A serialized connection row (keys as in ``max_connections_list``).
+
+    Returns:
+        The reconstructed :class:`MaxConnection`.
+
+    Raises:
+        TypeError: A required non-Optional field is None or missing.
+        ValueError: A present value cannot be coerced to the field's type
+            (e.g. ``branch_index="x"``).
+    """
+    hints = get_type_hints(MaxConnection)
+    kwargs: dict[str, Any] = {}
+    for fld in fields(MaxConnection):
+        raw: Any = d.get(fld.name)
+        ann = hints[fld.name]
+        args = get_args(ann)
+        # Only ``X | None`` unions are treated as Optional; a plain
+        # tuple[...] annotation keeps its OUTER tuple as the base type —
+        # get_args(tuple[tuple[float, float, float], ...]) is
+        # (tuple[float, float, float], Ellipsis), so naively taking args[0]
+        # would coerce arc_points as if it were a flat stall_point.
+        is_optional = get_origin(ann) in (UnionType, Union)
+        base = next(a for a in args if a is not type(None)) if is_optional else ann
+
+        if raw is None:
+            if fld.default is not MISSING:
+                kwargs[fld.name] = fld.default
+                continue
+            if fld.default_factory is not MISSING:
+                kwargs[fld.name] = fld.default_factory()
+                continue
+            if is_optional:
+                kwargs[fld.name] = None
+                continue
+            raise TypeError(f"connection row is missing required field {fld.name!r}")
+
+        origin = get_origin(base)
+        if origin is tuple:
+            elem_args = get_args(base)
+            elem = elem_args[0] if elem_args else Any
+            if get_origin(elem) is tuple:  # arc_points: tuple[tuple[float,...], ...]
+                kwargs[fld.name] = tuple(tuple(float(c) for c in pt) for pt in raw)
+            elif elem is str:
+                kwargs[fld.name] = tuple(str(x) for x in raw)
+            elif elem is float:
+                kwargs[fld.name] = tuple(float(x) for x in raw)
+            elif elem is int:
+                kwargs[fld.name] = tuple(int(x) for x in raw)
+            else:  # pragma: no cover - no other tuple shape in MaxConnection
+                kwargs[fld.name] = tuple(raw)
+        elif base is bool:
+            kwargs[fld.name] = bool(raw)
+        elif base is int:
+            kwargs[fld.name] = int(raw)
+        elif base is float:
+            kwargs[fld.name] = float(raw)
+        elif base is str:
+            kwargs[fld.name] = str(raw)
+        else:
+            kwargs[fld.name] = raw
+    return MaxConnection(**kwargs)
 
 
 @dataclass(frozen=True)
