@@ -66,8 +66,10 @@ if workspace_root not in sys.path:
 
 from gba_topology2.src.basin_boundary import (
     build_connection_graph,
+    find_maximum_basins,
     find_minimum_basins,
     serialize_connection_graph,
+    serialize_maximum_basins,
     serialize_minimum_basins,
 )
 from gba_topology2.src.basin_center import BasinCenter, extract_basin_centers
@@ -261,6 +263,10 @@ class RunContext:
     connection_pool: list[ConnectionTarget] = field(default_factory=list)
     #: Minimum basin boundaries computed from connections.
     minimum_basins: dict[str, Any] = field(default_factory=dict)
+    #: basin v11: the dual, bounded by the DESCENT arcs at the saddles whose
+    #: ASCENT branches climb into each maximum. Computed in the same stage from
+    #: the same two tables, because that is what the viewer draws.
+    maximum_basins: dict[str, Any] = field(default_factory=dict)
     connection_graph: dict[str, list[Any]] = field(default_factory=dict)
 
     def require_morse(self) -> MorseDetectionResult:
@@ -1006,13 +1012,23 @@ def stage_minimum_basins(ctx: RunContext) -> dict[str, Any]:
     saturated on few-saddle systems and its "raise k" advice was noise; both
     are gone.
 
+    basin v11 computes the DUAL in the same pass: a maximum's basin is bounded by
+    the saddle->minimum arcs at the saddles whose ASCENT branches climb into it.
+    The two rules are one rule read from opposite ends of the field, and the two
+    tables are already in hand, so the replay that reproduces a minimum's ring
+    reproduces a maximum's for free -- which is the point: the viewer now draws
+    both, and an observation of a hill boundary has to be checkable from the file.
+
     Returns:
         Summary of the basin detection: count, per-basin rings, the descent
         table's resolution statistics, and for every minimum without a basin,
-        the gates of the descent branches that failed to reach it.
+        the gates of the descent branches that failed to reach it. The maximum
+        side reports under the same shape (``n_maximum_basins``,
+        ``maxima_without_basins``).
     """
     if not ctx.connections:
         ctx.minimum_basins = {}
+        ctx.maximum_basins = {}
         ctx.connection_graph = {}
         return {"n_minimum_basins": 0}
 
@@ -1024,9 +1040,18 @@ def stage_minimum_basins(ctx: RunContext) -> dict[str, Any]:
             ctx.basin_centers,
             ctx.descent_connections,
         )
+        # basin v11: the dual. The ascent table is the ADJACENCY here and the
+        # descent table is the BOUNDARY GEOMETRY -- the exact exchange of the two
+        # arguments the minimum side passes, which is the duality, not a copy.
+        ctx.maximum_basins = find_maximum_basins(
+            ctx.connections,
+            ctx.basin_centers,
+            ctx.descent_connections,
+        )
     except (ValueError, Exception) as e:
         # Topology error or malformed data; use empty dict
         ctx.minimum_basins = {}
+        ctx.maximum_basins = {}
         ctx.connection_graph = {}
         return {
             "n_minimum_basins": 0,
@@ -1097,6 +1122,44 @@ def stage_minimum_basins(ctx: RunContext) -> dict[str, Any]:
         }
         for mid in minima_ids
         if mid not in ctx.minimum_basins
+    ]
+
+    # basin v11: the hill side, reported in the same shape. A maximum with no
+    # basin is not an error -- it is an open boundary, and the operator needs the
+    # gate that left it open for the same reason the minimum side does.
+    summary["n_maximum_basins"] = len(ctx.maximum_basins)
+    if ctx.maximum_basins:
+        summary["maxima_with_boundaries"] = [
+            {
+                "maximum_id": basin.maximum_id,
+                "n_boundary_arcs": len(basin.boundary_arcs),
+                "boundary_saddles": sorted(
+                    {str(arc.saddle_id) for arc in basin.boundary_arcs}
+                ),
+                "boundary_minima": sorted(
+                    {str(arc.min_id) for arc in basin.boundary_arcs if arc.min_id}
+                ),
+            }
+            for basin in ctx.maximum_basins.values()
+        ]
+    maxima_ids = [bc.center_id for bc in ctx.basin_centers if bc.polarity == "maximum"]
+    summary["maxima_without_basins"] = [
+        {
+            "maximum_id": max_id,
+            # The ASCENT gates this time: a hill has no boundary when no saddle
+            # climbs into it, and the reason is in the ascent table.
+            "failure_gates": sorted(
+                {
+                    str(c.failure_gate)
+                    for c in ctx.connections
+                    if c.failure_gate is not None
+                    and (c.blocker_id is None or c.blocker_polarity != "maximum")
+                }
+            )
+            or ["no ascent branch climbed into this maximum"],
+        }
+        for max_id in maxima_ids
+        if max_id not in ctx.maximum_basins
     ]
     return summary
 
@@ -1614,6 +1677,9 @@ def dump_results(ctx: RunContext, path: str) -> None:
     # so a missing key means the stage never ran, not "nothing found".
     payload["connection_graph"] = serialize_connection_graph(ctx.connection_graph)
     payload["minimum_basins"] = serialize_minimum_basins(ctx.minimum_basins)
+    # basin v11: the dual, through the shared serializer for the same field-for-
+    # field diffability the minimum side has with the viewer's own export.
+    payload["maximum_basins"] = serialize_maximum_basins(ctx.maximum_basins)
     try:
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, indent=2, sort_keys=True)

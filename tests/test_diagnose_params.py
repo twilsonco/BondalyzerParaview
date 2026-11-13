@@ -38,13 +38,16 @@ from gba_topology2.diagnose_params import (
     dump_results,
     run_stages,
     stage_connect,
+    stage_minimum_basins,
     stage_probe,
     summarize_ridge_postpass,
 )
 from gba_topology2.src.basin_boundary import (
     MinimumBasin,
     build_connection_graph,
+    find_maximum_basins,
     serialize_connection_graph,
+    serialize_maximum_basins,
 )
 from gba_topology2.src.point_locator import make_kdtree_nearest_finder
 
@@ -759,7 +762,110 @@ class TestRidgeOutputPlumbing:
         )
 
 
-class TestBasinTopologyDump:
+class TestMaximumBasinReplay:
+    """basin v11: the replay produces the hill side's boundary, not just its name.
+
+    The viewer draws a maximum's basin ring; a snapshot is only evidence if
+    `diagnose_params` reproduces the same basin from the file. The two tables the
+    dual consumes are already built by the connect stage, so what is being tested
+    here is the wiring and the reporting shape, not a new algorithm.
+    """
+
+    def test_the_octahedron_bounds_both_hills(self) -> None:
+        """The quadrupole octahedron is symmetric under negating the field, so the
+        dual must land on the same counts the minimum side gets -- and on the same
+        saddles, read the other way round.
+        """
+        ctx = _make_ctx()
+        summary = dict(run_stages(ctx))["minimum_basins"]
+
+        assert summary["n_maximum_basins"] == 2
+        assert sorted(ctx.maximum_basins) == ["MAX_0", "MAX_1"]
+        for basin in ctx.maximum_basins.values():
+            # The two saddles climb into each maximum, and they drain into both
+            # minima: the ring is closed because there are two of them.
+            assert sorted({str(a.saddle_id) for a in basin.boundary_arcs}) == [
+                "SAD_4",
+                "SAD_5",
+            ]
+            assert sorted({str(a.min_id) for a in basin.boundary_arcs}) == [
+                "MIN_2",
+                "MIN_3",
+            ]
+        assert summary["maxima_without_basins"] == []
+
+    def test_the_boundary_is_the_climbing_saddles_not_the_near_ones(self) -> None:
+        """The rule is adjacency off the field, and this is the one test that says
+        so: each maximum's boundary saddles are exactly the saddles whose ASCENT
+        branch reaches it. A spatial rule would agree on this symmetric mesh, which
+        is why the set is computed from the connection table here.
+        """
+        ctx = _make_ctx()
+        run_stages(ctx)
+
+        climbs: dict[str, set[str]] = {}
+        for c in ctx.connections:
+            if c.status == "connected" and c.max_id is not None:
+                climbs.setdefault(c.max_id, set()).add(c.saddle_id)
+
+        assert climbs, "the fixture produced no ascent connections"
+        for max_id, basin in ctx.maximum_basins.items():
+            assert {str(a.saddle_id) for a in basin.boundary_arcs} == climbs[max_id], (
+                max_id
+            )
+
+    def test_no_descent_arcs_means_no_hill_basin(self) -> None:
+        """An open boundary is not a basin.
+
+        The descent table is the boundary GEOMETRY on this side. With the adjacency
+        intact and the geometry gone, the answer is "unbounded", not "bounded by
+        nothing" -- the failure that made v9's rings meaningless.
+        """
+        ctx = _make_ctx()
+        run_stages(ctx)
+
+        assert find_maximum_basins(ctx.connections, ctx.basin_centers, []) == {}
+
+    def test_a_hill_no_saddle_climbs_into_is_reported_with_its_gate(self) -> None:
+        """The operator needs the reason, and on this side the reason lives in the
+        ascent table: no branch climbed into the maximum.
+        """
+        ctx = _make_ctx()
+        run_stages(ctx, stop_after="connect")
+        ctx.connection_graph = build_connection_graph(
+            [c for c in ctx.connections if c.max_id != "MAX_1"]
+        )
+        # Drop MAX_1 from the adjacency by removing every branch that named it. The
+        # descent table is untouched: the hill's boundary geometry exists, nothing
+        # climbs the hill.
+        ctx.connections = [c for c in ctx.connections if c.max_id != "MAX_1"]
+
+        summary = stage_minimum_basins(ctx)
+
+        assert "MAX_1" not in ctx.maximum_basins
+        reported = {
+            row["maximum_id"]: row["failure_gates"]
+            for row in summary["maxima_without_basins"]
+        }
+        assert "MAX_1" in reported
+        assert reported["MAX_1"], "an unbounded hill must say why"
+
+    def test_the_dump_carries_the_dual_field_for_field(self, tmp_path: Path) -> None:
+        """The results JSON and the viewer's params JSON diff against each other, so
+        the dual is emitted through the SHARED serializer, unconditionally.
+        """
+        ctx = _make_ctx()
+        run_stages(ctx)
+        out = tmp_path / "dump.json"
+        dump_results(ctx, str(out))
+        with open(out, encoding="utf-8") as fh:
+            payload = json.load(fh)
+
+        assert payload["maximum_basins"] == serialize_maximum_basins(ctx.maximum_basins)
+        assert sorted(payload["maximum_basins"]) == ["MAX_0", "MAX_1"]
+        arc = payload["maximum_basins"]["MAX_0"]["boundary_arcs"][0]
+        assert set(arc) == {"saddle_id", "branch_index", "min_id"}
+
     """v9: the basin topology reaches ``--out`` in the params-JSON shape."""
 
     def test_keys_are_unconditional(self, tmp_path: Path) -> None:

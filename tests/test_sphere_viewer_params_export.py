@@ -109,9 +109,18 @@ def _make_state(**overrides: Any) -> _FakeState:
     values["basin_centers_list"] = []
     values["connection_graph"] = {}
     values["minimum_basins"] = {}
+    values["maximum_basins"] = {}
     # v10: the descent drain table (basin adjacency) and its summary.
     values["min_connections_list"] = []
     values["descent_connection_stats"] = {}
+    # v11: what each basin GROUP drew and what the shared classifier said. The
+    # exporter skips a None metric, so a state that never carried these exports a
+    # subset and the strict key-set assertion fails on the new names.
+    values["min_basin_arcs"] = []
+    values["max_basin_arcs"] = []
+    values["active_min_basins"] = []
+    values["active_max_basins"] = []
+    values["basin_group_stats"] = {"minimum": {}, "maximum": {}}
     values["selected_cp"] = {"id_label": "SAD_42", "is_effective": False}
     values["selected_cluster"] = {"id": "MC3"}
     values["selected_catastrophe"] = None
@@ -657,9 +666,76 @@ def test_v10_export_carries_the_descent_table() -> None:
     metrics = payload["derived_metrics"]
     assert metrics["min_connections_list"] == [DESCENT_ROW]
     assert metrics["descent_connection_stats"] == stats
-    assert payload["schema_version"] == 10
+    assert payload["schema_version"] == 11
     loaded = load_params_from_dict(json.loads(json.dumps(payload)))
     assert loaded["derived_metrics"]["min_connections_list"] == [DESCENT_ROW]
+
+
+def test_v11_export_carries_the_maximum_basin_group() -> None:
+    """basin v11: the hill side's ring becomes citable.
+
+    The arcs a group drew, the centres on screen, the shared classification, and
+    the selected maximum. v10 recorded `selected_minimum_id` and never the
+    maximum's id, so a snapshot of a maximum's basin boundary named the valley
+    centre -- the asymmetry this pins shut from the file side.
+    """
+    stats = {
+        "minimum": {"status": "bounded", "n_rings": 1},
+        "maximum": {
+            "status": "bounded",
+            "n_rings": 2,
+            "min_separation_deg": 24.8,
+            "ring_gate_deg": 0.5,
+        },
+    }
+    payload = _export(
+        max_basin_arcs=[{"arc_kind": "ring", "endpoint_id": "MAX_1"}],
+        basin_group_stats=stats,
+        selected_maximum_id="MAX_7",
+    )
+    assert payload["schema_version"] == 11
+    assert payload["derived_metrics"]["max_basin_arcs"] == [
+        {"arc_kind": "ring", "endpoint_id": "MAX_1"}
+    ]
+    assert payload["derived_metrics"]["basin_group_stats"]["maximum"]["n_rings"] == 2
+    loaded = load_params_from_dict(payload)
+    assert (
+        loaded["derived_metrics"]["max_basin_arcs"]
+        == payload["derived_metrics"]["max_basin_arcs"]
+    )
+    assert loaded["selection"]["selected_maximum_id"] == "MAX_7"
+
+
+def test_a_v10_snapshot_loads_and_its_new_toggles_fill_off() -> None:
+    """The v10 incident was rings appearing unasked.
+
+    A v10 file says nothing about the maximum group, and "nothing" must read as
+    both switches off. The metrics v11 adds are ABSENT, not empty: an empty
+    `max_basin_arcs` would claim the group was computed and drew nothing, which is
+    a different statement about the past than "this file predates the group".
+    """
+    payload = _export()
+    payload["schema_version"] = 10
+    for key in (
+        "min_basin_arcs",
+        "max_basin_arcs",
+        "active_min_basins",
+        "active_max_basins",
+        "basin_group_stats",
+        "maximum_basins",
+    ):
+        payload["derived_metrics"].pop(key, None)
+    payload["selection"].pop("selected_maximum_id", None)
+
+    params = load_params_from_dict(payload)
+    assert params["show_basin_for_selected_maximum"] is False
+    assert params["show_all_maximum_basins"] is False
+    assert "max_basin_arcs" not in params["derived_metrics"]
+    # The v10 replay wrote no `maximum_basins` key at all. Its absence is the
+    # honest record; `minimum_basins` is present because v10 computed it.
+    assert "maximum_basins" not in params["derived_metrics"]
+    assert "minimum_basins" in params["derived_metrics"]
+    assert "selected_maximum_id" not in params["selection"]
 
 
 def test_a_v9_file_loads_without_the_descent_table() -> None:

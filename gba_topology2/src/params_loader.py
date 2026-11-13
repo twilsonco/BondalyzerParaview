@@ -171,6 +171,10 @@ def resolve_restore_plan(
         id_selections = {
             "selected_saddle_id": "selected_saddle_id",
             "selected_minimum_id": "selected_minimum_id",
+            # basin v11: the pair. A v10 file has no such key and `selection.get`
+            # returns None, so nothing is written -- which is the right restore, and
+            # why adding the key is not a breaking change to this path.
+            "selected_maximum_id": "selected_maximum_id",
         }
         for sel_key, state_key in id_selections.items():
             value = selection.get(sel_key)

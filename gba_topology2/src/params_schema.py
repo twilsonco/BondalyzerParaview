@@ -149,6 +149,12 @@ DEFAULT_UI_STATE: dict[str, Any] = {
     # minimum CP in the connection topology. Show individual minimum or all at once.
     "show_basin_for_selected_minimum": False,
     "show_all_minimum_basins": False,
+    # Maximum basin boundaries (basin v11): the same rule read from the other end,
+    # so the same two switches exist for the hill side. Defaults are False on BOTH
+    # sides -- a maximum's ring is drawn only when asked, and a snapshot that says
+    # nothing says "off", which is why the old file's silence is not a mismatch.
+    "show_basin_for_selected_maximum": False,
+    "show_all_maximum_basins": False,
 }
 
 # Schema version of the JSON file written by the "Save Parameters" button.
@@ -229,13 +235,24 @@ DEFAULT_UI_STATE: dict[str, Any] = {
 # systems and could not be diagnosed from the file. v9 is admitted as legacy: it
 # has no descent table, so the loader's replay reports its basins as
 # un-derivable-by-v10 rather than reconstructing them from the rule v10 rejected.
-PARAMS_SCHEMA_VERSION = 10
+#
+# Version 11 exports the maximum basin group: the ring/shell rows it draws
+# (max_basin_arcs), which centres are on screen (active_max_basins), the shared
+# occlusion classification (basin_group_stats, per polarity), and
+# selected_maximum_id. v10 shipped the rings for minima only, so a saved
+# observation of a hill's boundary was -- literally -- unrecordable: the file had
+# the arcs it drew for the valley side and nothing for the hill side, while the
+# screen showed both. v10 is admitted as legacy: its two new toggles are absent
+# and fill to False, which is what the v10 screen did with them (nothing), and
+# the metrics it lacks are absent because the feature did not exist, never
+# computed-empty.
+PARAMS_SCHEMA_VERSION = 11
 
 # Older schema versions that still load, with absent controls defaulted. A
 # snapshot is a record of what was ON SCREEN, so refusing to read a file written
 # before a control was invented destroys the evidence. The current version stays
 # strict: a truncated CURRENT file is a bug to surface, not a gap to paper over.
-PARAM_LEGACY_SCHEMA_VERSIONS: frozenset[int] = frozenset({2, 3, 4, 5, 6, 7, 8, 9})
+PARAM_LEGACY_SCHEMA_VERSIONS: frozenset[int] = frozenset({2, 3, 4, 5, 6, 7, 8, 9, 10})
 
 # Every editable control, in DEFAULT_UI_STATE's canonical order.
 PARAM_CONTROL_KEYS: tuple[str, ...] = tuple(DEFAULT_UI_STATE)
@@ -295,10 +312,24 @@ PARAM_METRIC_KEYS: tuple[str, ...] = (
     # saddle_id -> outgoing arcs, and each minimum's boundary cycle.
     "connection_graph",
     "minimum_basins",
+    # basin v11: the hill side of the same rule. The viewer draws a maximum's
+    # boundary ring, so the replay must produce it -- and it costs nothing, since
+    # find_maximum_basins consumes the two tables stage_minimum_basins already
+    # builds. Saved with them, a ring on a hill is citable from the file.
+    "maximum_basins",
     # basin v10: the descent drain table (the adjacency) and its summary.
     # Absent in a v9-era file -- the feature did not exist, never computed-empty.
     "min_connections_list",
     "descent_connection_stats",
+    # basin v11: what the two basin GROUPS drew and what the shared classifier
+    # said about them. The arc lists are render truth (the screen shows exactly
+    # what the gate warns about), basin_group_stats is the report; both are saved
+    # so a ring drawn for a maximum is citable, not just visible.
+    "min_basin_arcs",
+    "max_basin_arcs",
+    "active_min_basins",
+    "active_max_basins",
+    "basin_group_stats",
 )
 
 # The probe's summary, in the order ``make_ridge_probe_stats`` writes it. Exported so
@@ -566,6 +597,13 @@ def save_params_to_dict(
         # Basin visualization: the minimum selected for boundary display.
         "selected_minimum_id": (
             getattr(state_like, "selected_minimum_id", None) or None
+        ),
+        # basin v11: the pair. v10 recorded the valley selection and not the hill
+        # one, so a snapshot could say which minimum's ring was on screen and never
+        # which maximum's. The two are read by the same panel and gated by the same
+        # rule; the file now names both.
+        "selected_maximum_id": (
+            getattr(state_like, "selected_maximum_id", None) or None
         ),
     }
 
