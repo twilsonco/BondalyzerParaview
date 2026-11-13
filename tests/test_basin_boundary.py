@@ -1,6 +1,6 @@
 """Tests for gba_topology2.src.basin_boundary module."""
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Any
 
 import pytest
@@ -11,11 +11,13 @@ from gba_topology2.src.basin_boundary import (
     connection_from_state_dict,
     find_minimum_basins,
     get_basin_arcs,
+    min_connection_from_state_dict,
+    min_connection_to_state_dict,
     serialize_connection_graph,
     serialize_minimum_basins,
 )
 from gba_topology2.src.basin_center import BasinCenter
-from gba_topology2.src.max_connection import MaxConnection
+from gba_topology2.src.max_connection import MaxConnection, MinConnection
 
 
 def _make_connection(
@@ -24,6 +26,10 @@ def _make_connection(
     status: str = "connected",
     branch_index: int = 0,
     verified: bool = True,
+    arc_points: tuple[tuple[float, float, float], ...] = (
+        (0.0, 0.0, 1.0),
+        (1.0, 0.0, 0.0),
+    ),
 ) -> MaxConnection:
     """Helper to create a MaxConnection for testing."""
     return MaxConnection(
@@ -36,10 +42,33 @@ def _make_connection(
         along_track_deg=1.0,
         separation_deg=10.0,
         mutual=True,
-        arc_points=((0.0, 0.0, 1.0), (1.0, 0.0, 0.0)),
+        arc_points=arc_points,
         saddle_value=0.5,
         max_value=1.0 if max_id else None,
         verified=verified,
+    )
+
+
+def _make_descent(
+    saddle_id: str,
+    min_id: str | None,
+    status: str = "connected",
+    branch_index: int = 0,
+) -> MinConnection:
+    """Helper to create a descent record (the basin v10 adjacency)."""
+    return MinConnection(
+        saddle_id=saddle_id,
+        branch_index=branch_index,
+        min_id=min_id,
+        status=status,
+        direction_mode="port_tangent",
+        cross_track_deg=0.0,
+        along_track_deg=1.0,
+        separation_deg=10.0,
+        arc_points=((0.0, 0.0, 1.0), (1.0, 0.0, 0.0)),
+        saddle_value=0.5,
+        min_value=0.1 if min_id else None,
+        verified=True,
     )
 
 
@@ -161,47 +190,59 @@ class TestFindMinimumBasins:
 
     def test_empty_topology(self) -> None:
         """Empty connections and centers yield no basins."""
-        result = find_minimum_basins([], [])
+        result = find_minimum_basins([], [], [])
         assert result == {}
 
     def test_single_minimum_with_adjacent_saddles(self) -> None:
-        """Single minimum with connections from different saddles creates basin."""
-        # Minimum at origin with connections from different saddles
+        """Saddles whose descent drains into a minimum bound its basin."""
         minimum = _make_basin_center("MIN_1", "minimum", (0.0, 0.0, 0.0), value=0.1)
         maximum = _make_basin_center("MAX_1", "maximum", (0.0, 0.0, 2.0))
 
-        # Connections from saddles (saddles are identified by ID in connections)
         conn1 = _make_connection("SAD_1", "MAX_1")
         conn2 = _make_connection("SAD_2", "MAX_1")
         conn3 = _make_connection("SAD_3", "MAX_1")
+        descents = [
+            _make_descent("SAD_1", "MIN_1"),
+            _make_descent("SAD_2", "MIN_1"),
+            _make_descent("SAD_3", "MIN_1"),
+        ]
 
         basin_centers = [minimum, maximum]
-        result = find_minimum_basins([conn1, conn2, conn3], basin_centers)
+        result = find_minimum_basins([conn1, conn2, conn3], basin_centers, descents)
 
-        # If saddles can be looked up, basin should exist
-        # But without saddle positions in basin_centers, it won't be found
-        # This is expected with current algorithm
-        assert isinstance(result, dict)
+        # basin v10: adjacency is the descent table, so the membership is
+        # asserted, not "isinstance" -- every arc of the draining saddles is
+        # on the boundary.
+        assert set(result) == {"MIN_1"}
+        assert [a.saddle_id for a in result["MIN_1"].boundary_arcs] == [
+            "SAD_1",
+            "SAD_2",
+            "SAD_3",
+        ]
 
     def test_no_cycles(self) -> None:
         """Topology with no cycles (isolated minimum) yields no basins."""
         minimum = _make_basin_center("MIN_1", "minimum", (0.0, 0.0, 0.0))
         # No connections to any saddles
-        result = find_minimum_basins([], [minimum])
+        result = find_minimum_basins([], [minimum], [])
         assert result == {}
 
     def test_disconnected_minimum(self) -> None:
-        """Minimum with no adjacent saddles has no basin."""
+        """A minimum nothing drains into has no basin."""
         minimum1 = _make_basin_center("MIN_1", "minimum", (0.0, 0.0, 0.0))
         minimum2 = _make_basin_center("MIN_2", "minimum", (10.0, 10.0, 10.0))
         maximum = _make_basin_center("MAX_1", "maximum", (0.0, 0.0, 2.0))
 
         conn = _make_connection("SAD_1", "MAX_1")
         basin_centers = [minimum1, minimum2, maximum]
-        result = find_minimum_basins([conn], basin_centers)
+        result = find_minimum_basins(
+            [conn], basin_centers, [_make_descent("SAD_1", "MIN_1")]
+        )
 
-        # Without saddle positions, algorithm cannot determine basin membership
-        assert isinstance(result, dict)
+        # SAD_1 drains into MIN_1 only: MIN_2 has no boundary, even though the
+        # saddle's arc sits spatially near both.
+        assert set(result) == {"MIN_1"}
+        assert [a.saddle_id for a in result["MIN_1"].boundary_arcs] == ["SAD_1"]
 
     def test_filters_non_connected_arcs(self) -> None:
         """Only connected arcs are included in basins."""
@@ -212,10 +253,15 @@ class TestFindMinimumBasins:
         conn_occluded = _make_connection("SAD_1", "MAX_2", status="occluded")
 
         basin_centers = [minimum, maximum]
-        result = find_minimum_basins([conn_connected, conn_occluded], basin_centers)
+        result = find_minimum_basins(
+            [conn_connected, conn_occluded],
+            basin_centers,
+            [_make_descent("SAD_1", "MIN_1")],
+        )
 
         # Graph is built with only connected/verified arcs
-        assert isinstance(result, dict)
+        assert set(result) == {"MIN_1"}
+        assert [a.max_id for a in result["MIN_1"].boundary_arcs] == ["MAX_1"]
 
     def test_basin_structure(self) -> None:
         """Basin contains correct arc structure."""
@@ -223,7 +269,9 @@ class TestFindMinimumBasins:
         maximum = _make_basin_center("MAX_1", "maximum", (0.0, 0.0, 2.0))
 
         conn = _make_connection("SAD_1", "MAX_1")
-        result = find_minimum_basins([conn], [minimum, maximum])
+        result = find_minimum_basins(
+            [conn], [minimum, maximum], [_make_descent("SAD_1", "MIN_1")]
+        )
 
         # Result is a dict mapping minimum_id to MinimumBasin
         assert isinstance(result, dict)
@@ -244,10 +292,15 @@ class TestEdgeCases:
         conn_connected = _make_connection("SAD_1", "MAX_1")
 
         basin_centers = [minimum, maximum]
-        result = find_minimum_basins([conn_stalled, conn_connected], basin_centers)
+        result = find_minimum_basins(
+            [conn_stalled, conn_connected],
+            basin_centers,
+            [_make_descent("SAD_1", "MIN_1")],
+        )
 
         # Graph filters out None max_id connections
-        assert isinstance(result, dict)
+        assert set(result) == {"MIN_1"}
+        assert [a.max_id for a in result["MIN_1"].boundary_arcs] == ["MAX_1"]
 
     def test_empty_cycle_list(self) -> None:
         """Empty basin list yields empty dict."""
@@ -259,8 +312,161 @@ class TestEdgeCases:
         maximum = _make_basin_center("MAX_1", "maximum", (0.0, 0.0, 2.0))
 
         conn = _make_connection("SAD_1", "MAX_1")
-        result = find_minimum_basins([conn], [maximum])
+        result = find_minimum_basins([conn], [maximum], [])
         assert result == {}
+
+
+class TestBasinAdjacencyV10:
+    """basin v10: adjacency is DESCENT CONNECTIVITY, never spatial proximity.
+
+    The v9 rule (k=3 nearest saddles by Euclidean distance) saturated: with
+    few saddles every basin claimed every arc, and the advice pinned the fix
+    as "raise k". These are the rules the replacement must honour.
+    """
+
+    def test_adjacency_beats_proximity(self) -> None:
+        """The spatially nearest saddle is NOT the boundary; the draining one is."""
+        minimum = _make_basin_center("MIN_1", "minimum", (0.0, 0.0, 0.0))
+        maximum = _make_basin_center("MAX_1", "maximum", (0.0, 0.0, 2.0))
+        near = _make_connection(
+            "SAD_NEAR", "MAX_1", arc_points=((0.0, 0.0, 0.2), (1.0, 0.0, 0.0))
+        )
+        far = _make_connection(
+            "SAD_FAR", "MAX_1", arc_points=((0.0, 0.0, 5.0), (1.0, 0.0, 0.0))
+        )
+        result = find_minimum_basins(
+            [near, far], [minimum, maximum], [_make_descent("SAD_FAR", "MIN_1")]
+        )
+        assert [a.saddle_id for a in result["MIN_1"].boundary_arcs] == ["SAD_FAR"]
+
+    def test_saturation_resolved(self) -> None:
+        """Two minima, two saddles, one drain each: the basins are DISJOINT.
+
+        Under proximity with k=3 and only 2 saddles, every basin claimed every
+        arc of every saddle -- 2-of-2, the saturation the diagnose panel then
+        reported as "raise k". The descent table separates them.
+        """
+        min_a = _make_basin_center("MIN_A", "minimum", (0.0, 0.0, 0.0))
+        min_b = _make_basin_center("MIN_B", "minimum", (0.2, 0.0, 0.0))
+        maximum = _make_basin_center("MAX_1", "maximum", (0.0, 0.0, 2.0))
+        conn_a = _make_connection("SAD_1", "MAX_1")
+        conn_b = _make_connection("SAD_2", "MAX_1")
+        result = find_minimum_basins(
+            [conn_a, conn_b],
+            [min_a, min_b, maximum],
+            [_make_descent("SAD_1", "MIN_A"), _make_descent("SAD_2", "MIN_B")],
+        )
+        assert [a.saddle_id for a in result["MIN_A"].boundary_arcs] == ["SAD_1"]
+        assert [a.saddle_id for a in result["MIN_B"].boundary_arcs] == ["SAD_2"]
+
+    def test_empty_descent_table_yields_no_basins(self) -> None:
+        """No descent records = no adjacency known = no rings (no proximity fallback).
+
+        The fallback IS what v10 removed: a basin boundary must come from the
+        field, never from luck of the proximity list.
+        """
+        minimum = _make_basin_center("MIN_1", "minimum", (0.0, 0.0, 0.0))
+        maximum = _make_basin_center("MAX_1", "maximum", (0.0, 0.0, 2.0))
+        conn = _make_connection("SAD_1", "MAX_1")
+        assert find_minimum_basins([conn], [minimum, maximum], []) == {}
+
+    def test_unresolved_branches_are_not_adjacency(self) -> None:
+        """Only status == "connected" descent records bound a basin."""
+        minimum = _make_basin_center("MIN_1", "minimum", (0.0, 0.0, 0.0))
+        maximum = _make_basin_center("MAX_1", "maximum", (0.0, 0.0, 2.0))
+        conn = _make_connection("SAD_1", "MAX_1")
+        result = find_minimum_basins(
+            [conn],
+            [minimum, maximum],
+            [
+                _make_descent("SAD_1", None, status="no_target"),
+                _make_descent("SAD_1", "MIN_1", status="occluded"),
+            ],
+        )
+        assert result == {}
+
+    def test_multi_drain_saddle_bounds_every_basin_it_drains_into(self) -> None:
+        """A saddle with two draining branches bounds BOTH basins (ethene3 case)."""
+        min_a = _make_basin_center("MIN_A", "minimum", (0.0, 0.0, 0.0))
+        min_b = _make_basin_center("MIN_B", "minimum", (5.0, 0.0, 0.0))
+        maximum = _make_basin_center("MAX_1", "maximum", (0.0, 0.0, 2.0))
+        conn = _make_connection("SAD_1", "MAX_1")
+        result = find_minimum_basins(
+            [conn],
+            [min_a, min_b, maximum],
+            [
+                _make_descent("SAD_1", "MIN_A", branch_index=0),
+                _make_descent("SAD_1", "MIN_B", branch_index=1),
+            ],
+        )
+        assert set(result) == {"MIN_A", "MIN_B"}
+        assert [a.saddle_id for a in result["MIN_A"].boundary_arcs] == ["SAD_1"]
+        assert [a.saddle_id for a in result["MIN_B"].boundary_arcs] == ["SAD_1"]
+
+    def test_arc_order_follows_sorted_saddles_not_input_order(self) -> None:
+        """Membership depends on the record SET, never on input order."""
+        minimum = _make_basin_center("MIN_1", "minimum", (0.0, 0.0, 0.0))
+        maximum = _make_basin_center("MAX_1", "maximum", (0.0, 0.0, 2.0))
+        c1 = _make_connection("SAD_1", "MAX_1")
+        c2 = _make_connection("SAD_2", "MAX_1")
+        descents = [_make_descent("SAD_2", "MIN_1"), _make_descent("SAD_1", "MIN_1")]
+        for conns in ([c1, c2], [c2, c1]):
+            result = find_minimum_basins(conns, [minimum, maximum], descents)
+            assert [a.saddle_id for a in result["MIN_1"].boundary_arcs] == [
+                "SAD_1",
+                "SAD_2",
+            ]
+        for desc in (
+            [_make_descent("SAD_2", "MIN_1"), _make_descent("SAD_1", "MIN_1")],
+            [_make_descent("SAD_1", "MIN_1"), _make_descent("SAD_2", "MIN_1")],
+        ):
+            result = find_minimum_basins([c1, c2], [minimum, maximum], desc)
+            assert [a.saddle_id for a in result["MIN_1"].boundary_arcs] == [
+                "SAD_1",
+                "SAD_2",
+            ]
+
+
+class TestMinConnectionStateDict:
+    """The descent table crosses the params.json boundary (basin v10).
+
+    The v9 bug class: a null Optional field fed float(None), the per-row
+    except swallowed it, and the whole table vanished. These pin the round
+    trip against the same failure.
+    """
+
+    def test_round_trip_preserves_every_field(self) -> None:
+        c = _make_descent("SAD_1", "MIN_1")
+        assert min_connection_from_state_dict(min_connection_to_state_dict(c)) == c
+
+    def test_none_optional_fields_are_stored_values_not_corruption(self) -> None:
+        c = _make_descent("SAD_1", None, status="no_target")
+        row = min_connection_to_state_dict(c)
+        assert row["min_id"] is None
+        assert row["min_value"] is None
+        back = min_connection_from_state_dict(row)
+        assert back == c
+        assert back.min_id is None
+
+    def test_traced_tail_survives_the_round_trip(self) -> None:
+        """stall_point/transited_ids/completed_leg_deg: the traced valley's tail."""
+        c = replace(
+            _make_descent("SAD_1", None, status="no_target"),
+            method="gradient",
+            stall_point=(0.1, 0.2, 0.3),
+            transited_ids=("MAX_1", "MIN_2"),
+            completed_leg_deg=4.5,
+        )
+        back = min_connection_from_state_dict(min_connection_to_state_dict(c))
+        assert back == c
+        assert back.stall_point == (0.1, 0.2, 0.3)
+        assert back.transited_ids == ("MAX_1", "MIN_2")
+
+    def test_row_is_json_safe(self) -> None:
+        import json
+
+        row = min_connection_to_state_dict(_make_descent("SAD_1", "MIN_1"))
+        assert json.loads(json.dumps(row)) == row
 
 
 class TestSerializeConnectionGraph:
@@ -675,12 +881,33 @@ class TestConnectionFromStateDict:
             )
             for bc in _ETHENE3_BASIN_CENTERS
         ]
-        basins = find_minimum_basins(conn_objs, basin_centers)
+        basins = find_minimum_basins(
+            conn_objs,
+            basin_centers,
+            [
+                _make_descent("E-SAD_MS3", "E-MIN_MC3", branch_index=0),
+                _make_descent("E-SAD_MS3", "MIN_5011", branch_index=1),
+                _make_descent("E-SAD_MS4", "E-MIN_MC3", branch_index=0),
+                _make_descent("E-SAD_MS4", "MIN_5070", branch_index=1),
+            ],
+        )
+        # v10 reads the adjacency off the field: each saddle drains into two
+        # minima here (2 ascent arcs each), so E-MIN_MC3's ring is the 4 arcs
+        # of both saddles, and each bare minimum's ring is the 2 arcs of the
+        # single saddle that drains into it. v9 gave every basin all 4 and
+        # every ring passed through both saddles -- the saturation the diagnose
+        # panel misreported as "raise k".
         assert set(basins) == {"E-MIN_MC3", "MIN_5070", "MIN_5011"}
-        for basin in basins.values():
-            assert len(basin.boundary_arcs) == 4
-            assert {a.saddle_id for a in basin.boundary_arcs} == {
-                "E-SAD_MS3",
-                "E-SAD_MS4",
-            }
-            assert {a.max_id for a in basin.boundary_arcs} == {"MAX_4864"}
+        assert len(basins["E-MIN_MC3"].boundary_arcs) == 4
+        assert {a.saddle_id for a in basins["E-MIN_MC3"].boundary_arcs} == {
+            "E-SAD_MS3",
+            "E-SAD_MS4",
+        }
+        assert [a.saddle_id for a in basins["MIN_5011"].boundary_arcs] == [
+            "E-SAD_MS3",
+            "E-SAD_MS3",
+        ]
+        assert [a.saddle_id for a in basins["MIN_5070"].boundary_arcs] == [
+            "E-SAD_MS4",
+            "E-SAD_MS4",
+        ]

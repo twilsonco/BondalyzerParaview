@@ -1,17 +1,21 @@
 """Basin Boundary Consolidation for gba_topology2.
 
-Identifies minimum basin boundaries by finding saddles that topologically bound
-each minimum in the Morse-Smale complex. A minimum's basin boundary consists of
-the connections from saddles that are spatially adjacent to the minimum.
+Identifies minimum basin boundaries by DESCENT CONNECTIVITY: a minimum's basin
+is bounded by the saddle->maximum arcs at the saddles whose descent branches
+run into that minimum (basin v10). The v9 rule took the k=3 spatially nearest
+saddles instead, and it saturated -- with few saddles every basin claimed the
+same arcs and the same "raise k" advice, a real structure reported as a
+parameter problem. The graph statement -- which saddles drain here -- is what
+the boundary of a basin means.
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import MISSING, dataclass, fields
 from types import UnionType
-from typing import Any, Union, get_args, get_origin, get_type_hints
+from typing import Any, Union, get_args, get_origin, get_type_hints, overload
 
 from gba_topology2.src.basin_center import BasinCenter
-from gba_topology2.src.max_connection import MaxConnection
+from gba_topology2.src.max_connection import MaxConnection, MinConnection
 
 __all__ = [
     "MinimumBasin",
@@ -19,13 +23,25 @@ __all__ = [
     "connection_from_state_dict",
     "find_minimum_basins",
     "get_basin_arcs",
+    "min_connection_from_state_dict",
+    "min_connection_to_state_dict",
     "serialize_connection_graph",
     "serialize_minimum_basins",
 ]
 
 
-def connection_from_state_dict(d: Mapping[str, Any]) -> MaxConnection:
-    """Rehydrate a :class:`MaxConnection` from its state/params dict form.
+@overload
+def connection_from_state_dict(
+    d: Mapping[str, Any], cls: type[MaxConnection] = ...
+) -> MaxConnection: ...
+@overload
+def connection_from_state_dict(
+    d: Mapping[str, Any], cls: type[MinConnection]
+) -> MinConnection: ...
+def connection_from_state_dict(
+    d: Mapping[str, Any], cls: type[Any] = MaxConnection
+) -> Any:
+    """Rehydrate a connection record from its state/params dict form.
 
     The viewer's basin pipeline receives ``state.max_connections_list`` rows
     (JSON-safe dicts written by ``max_to_dict``) and must rebuild the typed
@@ -41,18 +57,22 @@ def connection_from_state_dict(d: Mapping[str, Any]) -> MaxConnection:
 
     Args:
         d: A serialized connection row (keys as in ``max_connections_list``).
+        cls: The dataclass to rebuild -- :class:`MaxConnection` (default) or
+            :class:`MinConnection`. The descent rows are the basin adjacency
+            (basin v10), so they cross the same file boundary and get the
+            same None-safe treatment.
 
     Returns:
-        The reconstructed :class:`MaxConnection`.
+        The reconstructed connection record.
 
     Raises:
         TypeError: A required non-Optional field is None or missing.
         ValueError: A present value cannot be coerced to the field's type
             (e.g. ``branch_index="x"``).
     """
-    hints = get_type_hints(MaxConnection)
+    hints = get_type_hints(cls)
     kwargs: dict[str, Any] = {}
-    for fld in fields(MaxConnection):
+    for fld in fields(cls):
         raw: Any = d.get(fld.name)
         ann = hints[fld.name]
         args = get_args(ann)
@@ -88,7 +108,7 @@ def connection_from_state_dict(d: Mapping[str, Any]) -> MaxConnection:
                 kwargs[fld.name] = tuple(float(x) for x in raw)
             elif elem is int:
                 kwargs[fld.name] = tuple(int(x) for x in raw)
-            else:  # pragma: no cover - no other tuple shape in MaxConnection
+            else:  # pragma: no cover - no other tuple shape in the records
                 kwargs[fld.name] = tuple(raw)
         elif base is bool:
             kwargs[fld.name] = bool(raw)
@@ -100,7 +120,52 @@ def connection_from_state_dict(d: Mapping[str, Any]) -> MaxConnection:
             kwargs[fld.name] = str(raw)
         else:
             kwargs[fld.name] = raw
-    return MaxConnection(**kwargs)
+    return cls(**kwargs)
+
+
+def min_connection_to_state_dict(c: MinConnection) -> dict[str, Any]:
+    """JSON-safe row for a descent record, the basin adjacency (basin v10).
+
+    Mirrors the ascent rows written by ``state.max_connections_list``: plain
+    scalars, ``None`` preserved for Optional fields (it is a legitimate stored
+    value -- ``min_id: None`` means "this branch drained nowhere"), tuples as
+    lists, and ``arc_points`` stored exactly as on the ascent side. That is
+    the v9 lesson applied: a saved observation must carry everything the
+    render reads, and in v10 the descent rows are what the selection ring
+    reads.
+
+    Args:
+        c: One descent record.
+
+    Returns:
+        A dict with one key per :class:`MinConnection` field.
+    """
+    return {
+        "saddle_id": c.saddle_id,
+        "branch_index": c.branch_index,
+        "min_id": c.min_id,
+        "status": c.status,
+        "direction_mode": c.direction_mode,
+        "cross_track_deg": c.cross_track_deg,
+        "along_track_deg": c.along_track_deg,
+        "separation_deg": c.separation_deg,
+        "arc_points": [list(p) for p in c.arc_points],
+        "saddle_value": c.saddle_value,
+        "min_value": c.min_value,
+        "verified": c.verified,
+        "blocker_id": c.blocker_id,
+        "blocker_polarity": c.blocker_polarity,
+        "method": c.method,
+        "failure_gate": c.failure_gate,
+        "stall_point": list(c.stall_point) if c.stall_point else None,
+        "transited_ids": list(c.transited_ids),
+        "completed_leg_deg": c.completed_leg_deg,
+    }
+
+
+def min_connection_from_state_dict(d: Mapping[str, Any]) -> MinConnection:
+    """Rehydrate a descent record with the ascent's None-safe rehydrator."""
+    return connection_from_state_dict(d, MinConnection)
 
 
 @dataclass(frozen=True)
@@ -110,8 +175,10 @@ class MinimumBasin:
     Attributes:
         minimum_id: Effective minimum CP ID (e.g., "E-MIN_MC3", "MIN_42").
         boundary_arcs: List of MaxConnection objects representing saddle-to-maximum
-            connections emanating from saddles adjacent to this minimum. These arcs
-            collectively form the topological boundary of the minimum's basin.
+            connections emanating from the saddles whose descent branches drain
+            into this minimum (basin v10 adjacency -- connectivity off the
+            field, not spatial proximity). These arcs collectively form the
+            topological boundary of the minimum's basin.
     """
 
     minimum_id: str
@@ -150,34 +217,40 @@ def build_connection_graph(
     return graph
 
 
-def _spatial_distance(
-    pos1: tuple[float, float, float], pos2: tuple[float, float, float]
-) -> float:
-    """Euclidean distance between two 3D points."""
-    dx = pos1[0] - pos2[0]
-    dy = pos1[1] - pos2[1]
-    dz = pos1[2] - pos2[2]
-    return float((dx * dx + dy * dy + dz * dz) ** 0.5)
-
-
 def find_minimum_basins(
     connections: list[MaxConnection],
     basin_centers: list[BasinCenter],
+    descent_connections: Sequence[MinConnection],
 ) -> dict[str, MinimumBasin]:
-    """Compute all minimum basin boundaries from saddle-maximum arcs.
+    """Compute all minimum basin boundaries from the connection topology.
 
-    For each minimum, finds all saddles that are spatially adjacent to it
-    (within the k-nearest neighbors by distance). The connections from those
-    saddles form the basin boundary. Saddle positions are derived from the
-    arc_points[0] (starting point) of each connection.
+    basin v10: a minimum's basin is bounded by the saddle->maximum arcs at the
+    saddles whose DESCENT branches run into that minimum. A saddle's stable
+    manifold drains into the minima it bounds -- that is the statement. The v9
+    rule took the k=3 spatially nearest saddles by Euclidean distance instead,
+    and it saturated: on a 2-saddle system every basin claimed the same 3 arcs
+    of 3 and every ring passed through both saddles, so a real structure read
+    as "k too small; raise to 4-8". Adjacency is now measured off the field
+    (the descent connector: cone capture on minima, disc occlusion, gradient
+    fall), never off proximity. When the descent table is empty no basin has a
+    boundary -- there is no proximity fallback, because proximity is exactly
+    what this rule replaced.
 
     Args:
-        connections: List of MaxConnection objects with status="connected".
-        basin_centers: List of all basin centers (raw and effective maxima/minima).
+        connections: The ascent table (all records; the graph filters to
+            connected, verified arcs via :func:`build_connection_graph`).
+        basin_centers: List of all basin centers (raw and effective maxima
+            /minima); only the minima get basins.
+        descent_connections: The descent table from
+            :func:`max_connection.connect_seed_to_minima`, raw (pre-refine;
+            refine is an ascent-side concept). A saddle is adjacent to a
+            minimum when one of its descent records has
+            ``status == "connected"`` and ``min_id`` equal to that minimum's
+            ``center_id``.
 
     Returns:
-        Dict[minimum_id, MinimumBasin] keyed by effective minimum CP ID.
-        Empty dict if no minima exist or have adjacent saddles.
+        Dict[minimum_id, MinimumBasin] keyed by minimum CP ID. A minimum with
+        no draining saddle is absent.
 
     Raises:
         ValueError: If topology is malformed.
@@ -194,41 +267,23 @@ def find_minimum_basins(
     if not graph:
         return {}
 
-    # Derive saddle positions from arc_points[0] of each connection
-    # Build a dict mapping saddle_id -> position (from first arc point)
-    saddle_positions: dict[str, tuple[float, float, float]] = {}
-    for conn in connections:
-        if conn.status == "connected" and conn.verified and conn.arc_points:
-            # arc_points[0] is the starting point (saddle position)
-            saddle_pos = conn.arc_points[0]
-            saddle_id = conn.saddle_id
-            if saddle_id not in saddle_positions:
-                saddle_positions[saddle_id] = saddle_pos
+    # The adjacency, off the field: minimum_id -> the saddle_ids that drain
+    # into it. Sorted by saddle id so a basin's arc list depends only on the
+    # record SET, never on the order the caller assembled it.
+    drains_into: dict[str, set[str]] = {}
+    for desc in descent_connections:
+        if desc.status == "connected" and desc.min_id is not None:
+            drains_into.setdefault(desc.min_id, set()).add(desc.saddle_id)
 
-    # For each minimum, find adjacent saddles (k-nearest by spatial distance)
     basins_dict: dict[str, MinimumBasin] = {}
 
     for minimum in minima:
-        # Find distances from this minimum to all saddles
-        distances = []
-        for saddle_id, pos in saddle_positions.items():
-            dist = _spatial_distance(minimum.position, pos)
-            distances.append((dist, saddle_id))
+        adjacent = drains_into.get(minimum.center_id, set())
 
-        if not distances:
-            continue
-
-        # Sort by distance and take the k nearest (k=3 for a 2-sphere minimum)
-        # On a sphere, a generic minimum has 3 neighboring saddles
-        distances.sort()
-        k_nearest = min(3, len(distances))
-        nearby_saddles = [saddle_id for _, saddle_id in distances[:k_nearest]]
-
-        # Collect all connections from nearby saddles
-        boundary_arcs = []
-        for saddle_id in nearby_saddles:
-            if saddle_id in graph:
-                boundary_arcs.extend(graph[saddle_id])
+        # Collect all ascent arcs from the draining saddles.
+        boundary_arcs: list[MaxConnection] = []
+        for saddle_id in sorted(adjacent):
+            boundary_arcs.extend(graph.get(saddle_id, []))
 
         if boundary_arcs:
             basins_dict[minimum.center_id] = MinimumBasin(
