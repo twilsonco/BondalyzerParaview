@@ -194,6 +194,13 @@ __all__ = [
     "save_params_to_dict",
 ]
 
+# Module-level caches for basin topology. These hold Python objects that
+# are not JSON-serializable, so they are kept outside Trame state to prevent
+# serialization warnings. They are cleared whenever the pipeline rebuilds.
+_minimum_basins_cache: dict[str, MinimumBasin] | None = None
+_maximum_basins_cache: dict[str, MaximumBasin] | None = None
+_connection_graph: Any = None
+
 # Vuetify theme handed to createVuetify() through the layout's
 # ``vuetify_config=`` argument (which stores it as ``trame__vuetify3_config``).
 #
@@ -2516,7 +2523,6 @@ def run_sphere_viewer(
     # The selected maximum, named so the selection-driven basin toggles can find
     # the basin of the CP on screen. The center itself is state.selected_basin_center.
     state.selected_maximum_id = None
-    state.minimum_basins_cache = None  # dict[str, MinimumBasin] | None
     # basin v11 render truth (the four lists + the summary the drawer and the
     # classifier share). The MIN keys are the side that has existed since v10;
     # the MAX keys are this unit's addition, and the pair is what occlusion
@@ -2526,14 +2532,11 @@ def run_sphere_viewer(
     state.active_max_basins = []
     state.max_basin_arcs = []
     state.basin_group_stats = {"minimum": {}, "maximum": {}}
-    state.maximum_basins_cache = None  # dict[str, MaximumBasin] | None
-    state.active_max_basins = []
-    state.max_basin_arcs = []
     # JSON-safe exports of the basin topology, written when the cache computes
     # and cleared when the arc table rebuilds. SAVE PARAMETERS copies these
     # into derived_metrics (PARAM_METRIC_KEYS); None means "never computed", so
     # a saved file distinguishes "no basins" from "basins not derived".
-    state.connection_graph = None
+    _connection_graph = None
     state.minimum_basins = None
     state.maximum_basins = None
     # Absolute path of the most recent "Save Parameters" JSON, for the
@@ -2572,6 +2575,7 @@ def run_sphere_viewer(
     suppress_param_change = False
 
     def update_topology() -> None:
+        global _minimum_basins_cache, _maximum_basins_cache, _connection_graph
         nonlocal runtime_cps, runtime_clusters, runtime_catastrophes
         nonlocal runtime_effective_cps, runtime_hidden_vertex_ids
         nonlocal runtime_max_connections
@@ -3480,9 +3484,9 @@ def run_sphere_viewer(
         # lag behind the exported arcs. maximum_basins_cache is the new entry on
         # this list; leaving it out is how a recompute ends up drawing a hill's
         # ring around last run's saddles.
-        state.minimum_basins_cache = None
-        state.maximum_basins_cache = None
-        state.connection_graph = None
+        _minimum_basins_cache = None
+        _maximum_basins_cache = None
+        _connection_graph = None
         state.minimum_basins = None
         state.maximum_basins = None
         # The basin overlay is drawn from the tables that just went away, so it
@@ -4421,15 +4425,16 @@ def run_sphere_viewer(
         ``state.params_last_saved_path`` for the drawer confirmation chip.
         The write is a pure state read, so no pipeline recompute is needed.
         """
+        global _minimum_basins_cache, _maximum_basins_cache, _connection_graph
         try:
             # Clear the Python-object caches before serialization. They hold
             # MinimumBasin/MaximumBasin class instances that are not JSON-safe;
             # the serialized versions (state.minimum_basins, state.maximum_basins)
             # are what gets saved. The caches are computed on load, so they don't
             # need to persist.
-            state.minimum_basins_cache = None
-            state.maximum_basins_cache = None
-            state.connection_graph = None
+            _minimum_basins_cache = None
+            _maximum_basins_cache = None
+            _connection_graph = None
             payload = save_params_to_dict(
                 state,
                 plt_path=session.plt_path,
@@ -4879,24 +4884,25 @@ def run_sphere_viewer(
         Args:
             maximum_id: Maximum CP ID to show, or None for "show all" mode.
         """
-        if state.maximum_basins_cache is None:
+        global _maximum_basins_cache
+        if _maximum_basins_cache is None:
             conn_objs = _rehydrate_ascent_rows()
             descent_objs = _rehydrate_descent_rows()
             centers = _basin_center_objects()
             try:
-                state.maximum_basins_cache = find_maximum_basins(
+                _maximum_basins_cache = find_maximum_basins(
                     conn_objs, centers, descent_objs
                 )
             except (ValueError, Exception):
-                state.maximum_basins_cache = {}
+                _maximum_basins_cache = {}
             # Export the topology the render below draws, with the shared
             # serializers, so a saved params file and a diagnose_params results
             # file diff field-for-field against each other on BOTH sides. The
             # minimum side's export is left to compute_and_show_basin, which
             # already owns it; only the new key is written here.
-            state.maximum_basins = serialize_maximum_basins(state.maximum_basins_cache)
+            state.maximum_basins = serialize_maximum_basins(_maximum_basins_cache)
 
-        cache = state.maximum_basins_cache or {}
+        cache = _maximum_basins_cache or {}
         drawn_ids: list[str] = []
         if state.show_all_maximum_basins:
             drawn_ids = sorted(cache)
@@ -4941,8 +4947,9 @@ def run_sphere_viewer(
         Args:
             minimum_id: Minimum CP ID to show, or None for "show all" mode.
         """
+        global _minimum_basins_cache, _connection_graph
         # Lazily compute basins if not cached
-        if state.minimum_basins_cache is None:
+        if _minimum_basins_cache is None:
             conn_objs = _rehydrate_ascent_rows()
             # basin v10: the descent table, rehydrated exactly like the arcs --
             # the None-safe, dataclass-driven rehydrator, loud per-row drops.
@@ -4956,19 +4963,19 @@ def run_sphere_viewer(
             # no rings; that is the rule's honest behavior, not a regression,
             # and the metrics above say which case the screen is in.
             try:
-                state.minimum_basins_cache = find_minimum_basins(
+                _minimum_basins_cache = find_minimum_basins(
                     conn_objs, basin_centers, descents
                 )
             except (ValueError, Exception):
                 # Topology error or malformed data; use empty dict
-                state.minimum_basins_cache = {}
+                _minimum_basins_cache = {}
             # Export the topology the render below is about to draw, with the
             # shared serializers so the saved params diff field-for-field
             # against diagnose_params' results dump.
-            state.connection_graph = serialize_connection_graph(
+            _connection_graph = serialize_connection_graph(
                 build_connection_graph(conn_objs)
             )
-            state.minimum_basins = serialize_minimum_basins(state.minimum_basins_cache)
+            state.minimum_basins = serialize_minimum_basins(_minimum_basins_cache)
 
         # Determine which basins to draw, project them to render rows, and let
         # the shared group pass decide what is visible (basin v11). The minimum
@@ -4977,17 +4984,17 @@ def run_sphere_viewer(
         # received "minimum"; it now owns a group, which is what makes the two
         # polarities orderable against each other at all.
         drawn_basins: list[MinimumBasin] = []
-        if state.show_all_minimum_basins and state.minimum_basins_cache:
+        if state.show_all_minimum_basins and _minimum_basins_cache:
             # Draw all basin boundaries
-            drawn_basins = list(state.minimum_basins_cache.values())
+            drawn_basins = list(_minimum_basins_cache.values())
         elif (
             state.show_basin_for_selected_minimum
             and minimum_id
-            and state.minimum_basins_cache
-            and minimum_id in state.minimum_basins_cache
+            and _minimum_basins_cache
+            and minimum_id in _minimum_basins_cache
         ):
             # Draw only the selected minimum's boundary
-            drawn_basins = [state.minimum_basins_cache[minimum_id]]
+            drawn_basins = [_minimum_basins_cache[minimum_id]]
 
         state.min_basin_arcs = _project_basin_arcs(
             "minimum",
