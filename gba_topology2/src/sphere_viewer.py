@@ -3100,6 +3100,10 @@ def run_sphere_viewer(
                 "total_turn_after_deg": c.total_turn_after_deg,
                 "blocker_id": c.blocker_id,
                 "blocker_polarity": c.blocker_polarity,
+                "arc_points": [list(p) for p in c.arc_points],
+                "saddle_value": c.saddle_value,
+                "max_value": c.max_value,
+                "direction_mode": c.direction_mode,
             }
             for c in runtime_max_connections
         ]

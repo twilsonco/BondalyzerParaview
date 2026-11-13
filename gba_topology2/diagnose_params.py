@@ -1509,6 +1509,23 @@ def dump_results(ctx: RunContext, path: str) -> None:
             for t in ctx.connection_pool
         ],
     }
+    # Add minimum basins to payload for debugging
+    if ctx.minimum_basins:
+        payload["minimum_basins"] = {
+            min_id: {
+                "minimum_id": basin.minimum_id,
+                "n_boundary_arcs": len(basin.boundary_arcs),
+                "boundary_arcs": [
+                    {
+                        "saddle_id": arc.saddle_id,
+                        "branch_index": arc.branch_index,
+                        "max_id": arc.max_id,
+                    }
+                    for arc in basin.boundary_arcs
+                ],
+            }
+            for min_id, basin in ctx.minimum_basins.items()
+        }
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2, sort_keys=True)
         fh.write("\n")
