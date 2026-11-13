@@ -203,13 +203,29 @@ DEFAULT_UI_STATE: dict[str, Any] = {
 # every snapshot on disk predates the export, and the absence of a measurement is not
 # a measurement of zero -- diagnose_params reports "no comparable metric" for those
 # files rather than a mismatch.
-PARAMS_SCHEMA_VERSION = 8
+# Version 8 exports the ridge probe's OUTPUT (derived_metrics.ridge_probe_stats), not
+# just its switch. No control key was invented, so the strict/legacy split is
+# unaffected: metrics are outputs the loader never feeds back into the pipeline, and
+# a v7 file simply has no probe block to compare. v7 is admitted as legacy because
+# every snapshot on disk predates the export, and the absence of a measurement is not
+# a measurement of zero -- diagnose_params reports "no comparable metric" for those
+# files rather than a mismatch.
+#
+# Version 9 exports the structures behind the minimum-basin visualization:
+# max_connections_list (the saddle->max arc table, arc geometry included),
+# basin_centers_list, and the derived connection_graph / minimum_basins. Basin
+# boundaries are cycles in that graph, so a saved observation is not verifiable
+# without it -- toggles that render nothing were undiagnosable from the file.
+# All four are METRICS, not controls: absent sections in an older file mean the
+# feature did not exist, never a computed-empty. v8 is admitted as legacy for the
+# same reason v7 was: every snapshot on disk predates the export.
+PARAMS_SCHEMA_VERSION = 9
 
 # Older schema versions that still load, with absent controls defaulted. A
 # snapshot is a record of what was ON SCREEN, so refusing to read a file written
 # before a control was invented destroys the evidence. The current version stays
 # strict: a truncated CURRENT file is a bug to surface, not a gap to paper over.
-PARAM_LEGACY_SCHEMA_VERSIONS: frozenset[int] = frozenset({2, 3, 4, 5, 6, 7})
+PARAM_LEGACY_SCHEMA_VERSIONS: frozenset[int] = frozenset({2, 3, 4, 5, 6, 7, 8})
 
 # Every editable control, in DEFAULT_UI_STATE's canonical order.
 PARAM_CONTROL_KEYS: tuple[str, ...] = tuple(DEFAULT_UI_STATE)
@@ -258,6 +274,17 @@ PARAM_METRIC_KEYS: tuple[str, ...] = (
     # Saving it makes a diagnostic observation citable: the switch was already in
     # the snapshot, but a switch says what was asked for, not what was found.
     "ridge_probe_stats",
+    # The saddle->max arc table and the CP table it is scored against. These are
+    # the raw material of the minimum-basin boundaries: a saved observation that
+    # shows basin cycles must carry the arcs, their geometry, and the minima they
+    # enclose, or the file cannot be checked against the screen.
+    "max_connections_list",
+    "basin_centers_list",
+    # Derived topology, serialized by basin_boundary.serialize_* (shared with
+    # diagnose_params so the two files diff field-for-field): the graph as
+    # saddle_id -> outgoing arcs, and each minimum's boundary cycle.
+    "connection_graph",
+    "minimum_basins",
 )
 
 # The probe's summary, in the order ``make_ridge_probe_stats`` writes it. Exported so

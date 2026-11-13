@@ -75,8 +75,11 @@ if workspace_root not in sys.path:
 from BondalyzerParaView.plt_gba_to_vtm import extract_gba_zones_from_plt
 from BondalyzerParaView.trame_viewer import get_display_title, get_robust_scalar_bounds
 from gba_topology2.src.basin_boundary import (
+    build_connection_graph,
     find_minimum_basins,
     get_basin_arcs,
+    serialize_connection_graph,
+    serialize_minimum_basins,
 )
 from gba_topology2.src.basin_center import (
     BasinCenter,
@@ -2203,6 +2206,12 @@ def run_sphere_viewer(
     state.show_all_minimum_basins = False
     state.selected_minimum_id = None
     state.minimum_basins_cache = None  # dict[str, MinimumBasin] | None
+    # JSON-safe exports of the basin topology, written when the cache computes
+    # and cleared when the arc table rebuilds. SAVE PARAMETERS copies these
+    # into derived_metrics (PARAM_METRIC_KEYS); None means "never computed", so
+    # a saved file distinguishes "no basins" from "basins not derived".
+    state.connection_graph = None
+    state.minimum_basins = None
     # Absolute path of the most recent "Save Parameters" JSON, for the
     # drawer confirmation chip. Export-only: deliberately absent from
     # DEFAULT_UI_STATE and the @state.change decorator (it triggers no
@@ -3107,6 +3116,12 @@ def run_sphere_viewer(
             }
             for c in runtime_max_connections
         ]
+        # The arc table is the raw material of the basin topology; a rebuild
+        # invalidates every derived structure, so the exported graph can never
+        # lag behind the exported arcs.
+        state.minimum_basins_cache = None
+        state.connection_graph = None
+        state.minimum_basins = None
         # The selection overlay is selection-driven, so a rebuild has to refresh
         # it: the arcs drawn for the currently selected maximum are gone with the
         # old table until this runs.
@@ -4250,6 +4265,13 @@ def run_sphere_viewer(
             except (ValueError, Exception):
                 # Topology error or malformed data; use empty dict
                 state.minimum_basins_cache = {}
+            # Export the topology the render below is about to draw, with the
+            # shared serializers so the saved params diff field-for-field
+            # against diagnose_params' results dump.
+            state.connection_graph = serialize_connection_graph(
+                build_connection_graph(conn_objs)
+            )
+            state.minimum_basins = serialize_minimum_basins(state.minimum_basins_cache)
 
         # Determine which arcs to draw based on toggle states
         basin_arcs_to_draw: list[MaxConnection] = []

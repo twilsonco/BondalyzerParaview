@@ -67,6 +67,8 @@ if workspace_root not in sys.path:
 from gba_topology2.src.basin_boundary import (
     build_connection_graph,
     find_minimum_basins,
+    serialize_connection_graph,
+    serialize_minimum_basins,
 )
 from gba_topology2.src.basin_center import BasinCenter, extract_basin_centers
 from gba_topology2.src.catastrophe_classifier import (
@@ -1538,40 +1540,18 @@ def dump_results(ctx: RunContext, path: str) -> None:
             for t in ctx.connection_pool
         ],
     }
-    # Add minimum basins to payload for debugging
-    if ctx.minimum_basins:
-        payload["minimum_basins"] = {
-            min_id: {
-                "minimum_id": basin.minimum_id,
-                "n_boundary_arcs": len(basin.boundary_arcs),
-                "boundary_arcs": [
-                    {
-                        "saddle_id": arc.saddle_id,
-                        "branch_index": arc.branch_index,
-                        "max_id": arc.max_id,
-                    }
-                    for arc in basin.boundary_arcs
-                ],
-            }
-            for min_id, basin in ctx.minimum_basins.items()
-        }
-    # Add connection graph for diagnostics
-    if ctx.connection_graph:
-        payload["connection_graph"] = {
-            saddle_id: [
-                {
-                    "max_id": conn.max_id,
-                    "branch_index": conn.branch_index,
-                    "status": conn.status,
-                    "verified": conn.verified,
-                }
-                for conn in conns
-            ]
-            for saddle_id, conns in ctx.connection_graph.items()
-        }
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(payload, fh, indent=2, sort_keys=True)
-        fh.write("\n")
+    # Basin topology, via the shared serializers: the params JSON written by
+    # the viewer and this results dump must agree field-for-field for the two
+    # to be diffable. Emitted UNCONDITIONALLY (empty dict = computed empty),
+    # so a missing key means the stage never ran, not "nothing found".
+    payload["connection_graph"] = serialize_connection_graph(ctx.connection_graph)
+    payload["minimum_basins"] = serialize_minimum_basins(ctx.minimum_basins)
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+    except OSError as exc:
+        raise RuntimeError(f"Failed to write results dump to {path!r}: {exc}") from exc
 
 
 def main() -> int:

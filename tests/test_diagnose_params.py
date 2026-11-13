@@ -41,6 +41,11 @@ from gba_topology2.diagnose_params import (
     stage_probe,
     summarize_ridge_postpass,
 )
+from gba_topology2.src.basin_boundary import (
+    MinimumBasin,
+    build_connection_graph,
+    serialize_connection_graph,
+)
 from gba_topology2.src.point_locator import make_kdtree_nearest_finder
 
 
@@ -752,3 +757,47 @@ class TestRidgeOutputPlumbing:
         assert {"refined", "n_nodes", "total_turn_after_deg"} <= set(
             payload["max_connections"][0]
         )
+
+
+class TestBasinTopologyDump:
+    """v9: the basin topology reaches ``--out`` in the params-JSON shape."""
+
+    def test_keys_are_unconditional(self, tmp_path: Path) -> None:
+        """A ctx that never built basins still exports both keys as empty.
+
+        The old dump omitted them when empty, so a missing key was ambiguous
+        between "stage did not run" and "topology found nothing".
+        """
+        ctx = _make_ctx()
+        out = tmp_path / "dump.json"
+        dump_results(ctx, str(out))
+        payload = json.loads(out.read_text(encoding="utf-8"))
+        assert payload["connection_graph"] == {}
+        assert payload["minimum_basins"] == {}
+
+    def test_dump_matches_shared_serializers(self, tmp_path: Path) -> None:
+        """The dump section is byte-identical to what SAVE PARAMETERS writes."""
+        ctx = _make_ctx()
+        conns = [
+            _conn(saddle_id="SAD_1", max_id="MAX_A"),
+            _conn(saddle_id="SAD_1", max_id="MAX_B", branch_index=1),
+        ]
+        ctx.connection_graph = build_connection_graph(conns)
+        ctx.minimum_basins = {
+            "MIN_1": MinimumBasin(minimum_id="MIN_1", boundary_arcs=list(conns))
+        }
+        out = tmp_path / "dump.json"
+        dump_results(ctx, str(out))
+        payload = json.loads(out.read_text(encoding="utf-8"))
+        assert payload["connection_graph"] == serialize_connection_graph(
+            ctx.connection_graph
+        )
+        basin = payload["minimum_basins"]["MIN_1"]
+        assert basin["n_boundary_arcs"] == 2
+        assert basin["boundary_saddles"] == ["SAD_1"]
+        assert basin["boundary_maxima"] == ["MAX_A", "MAX_B"]
+        assert basin["boundary_arcs"][0] == {
+            "saddle_id": "SAD_1",
+            "branch_index": 0,
+            "max_id": "MAX_A",
+        }

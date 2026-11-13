@@ -3865,3 +3865,41 @@ own interpreter; that file cannot be checked in this venv). That is why mypy nee
 
 **Gate state at commit:** pyright 0 / 0 (65 files). mypy: "Success: no issues found in 65 source
 files". ruff: All checks passed. format: 67 files already formatted. pytest: 651 passed, 1 skipped.
+
+## 2026-11-12 — Basins that render must be basins that can be read off the file (schema v9)
+
+Operator report: with **Show All Minimum Basin Boundaries** on, SAVE PARAMETERS wrote a JSON with
+no saddle->max graph and no minimum->boundary association -- the drawn cycles were undiagnosable
+from the file. Root cause: `save_params_to_dict` exports the fixed `PARAM_METRIC_KEYS` list
+(7 keys); `connection_graph`, `minimum_basins`, `max_connections_list` and `basin_centers_list`
+were simply not in it. `diagnose_params.dump_results` DID carry two of them, in two ad-hoc shapes
+and only when non-empty, so the two files were not diffable and a missing key was ambiguous
+between "stage never ran" and "topology found nothing".
+
+**The fix is a schema bump, not an exporter patch.** v9 (legacy set gains 8) adds the four keys
+to `PARAM_METRIC_KEYS` -- they are METRICS, not controls: an absent section in an older file means
+the feature did not exist, never a computed-empty. `basin_boundary.serialize_connection_graph` /
+`serialize_minimum_basins` are now the ONE shape, shared by the viewer export and the results dump
+(`selected_basin_center_id` set the same way for both). The dump emits them unconditionally.
+`selection` gains `selected_minimum_id`. The viewer writes the serialized dict the moment
+`compute_and_show_basin` computes the cache, and the arc-table rebuild clears cache + both metric
+keys, so a saved file can never carry a graph lagging its arcs. `state.connection_graph=None`
+initialization distinguishes "never computed" (key absent) from "computed empty" (`{}`).
+
+**Same-day basin fixes** (pre-v9, commits 07a80e2..57b4cc6): `find_minimum_basins` was keying
+basins by a truncated CP vertex id (`5011`) so the selection callback's `MIN_5011` always missed
+the cache -- the mapping now preserves the full id; the graph includes unverified CPs (verified
+ones win per id) and derives saddle positions from `arc_points[0]` because the CP table has no
+unified id space; monkey saddles join basin adjacency as all 3 member saddles;
+on_selection cp-click restores the saddle end (`selected_saddle_id`/`is_max` in
+`_apply_cp_picked`) so LOAD PARAMETERS reproduces selection-scoped probe stats; `apply_probe_display_gates`
+now writes back the gated arcs (`max_arcs_list`, `max_arcs_saddle_endpoint_list`).
+
+**Verification:** `diagnose_params.py ethene3_atom1_params.json --out ...` reproduces 94/94 against
+the v8 file and the dump carries the graph (2 saddles/4 arcs) and 3 minimum basins (4 boundary
+arcs each, all around MAX_4864 -- the three minima of this field share one basin ring).
+
+**Gate state at commit:** mypy clean on the touched modules; ruff format/check clean (scoped to
+`gba_topology2/` + `tests/` -- repo-wide `ruff format .` churns the legacy `BondalyzerParaView/`
+and `gba_topology/` dirs, which are not formatted to this standard; those edits were reverted via
+stash). pytest: 686 passed, 1 skipped.

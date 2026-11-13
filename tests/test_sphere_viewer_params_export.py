@@ -102,6 +102,13 @@ def _make_state(**overrides: Any) -> _FakeState:
     # exporter skips a metric that is None, so a fake state that never carried it
     # silently exported a subset of PARAM_METRIC_KEYS.
     values["ridge_probe_stats"] = make_ridge_probe_stats([], on=False)
+    # v9: the arc table, its CP scoring targets, and the derived basin topology.
+    # The exporter skips a None metric, so a state that never carried these
+    # exports a subset and the strict export test fails on the key set.
+    values["max_connections_list"] = []
+    values["basin_centers_list"] = []
+    values["connection_graph"] = {}
+    values["minimum_basins"] = {}
     values["selected_cp"] = {"id_label": "SAD_42", "is_effective": False}
     values["selected_cluster"] = {"id": "MC3"}
     values["selected_catastrophe"] = None
@@ -511,3 +518,89 @@ def test_a_v7_file_loads_with_the_probe_scope_absent() -> None:
     assert params["probe_ridge_points"] is True
     assert "selected_saddle_id" not in params["selection"]
     assert params["derived_metrics"]["ridge_probe_stats"]["scope_basin_id"] is None
+
+
+def test_basin_topology_is_recorded_in_the_snapshot() -> None:
+    """The saddle->max graph and each minimum's basin cycle travel in the file.
+
+    Basin boundaries are cycles in the connection graph, so a saved observation
+    that renders them must CARRY the graph: toggles that draw nothing were
+    undiagnosable from a file that recorded neither the arcs nor the cycles.
+    """
+    graph = {
+        "SAD_1": [
+            {
+                "max_id": "MAX_1",
+                "branch_index": 0,
+                "status": "connected",
+                "verified": True,
+            }
+        ]
+    }
+    basins = {
+        "MIN_1": {
+            "minimum_id": "MIN_1",
+            "n_boundary_arcs": 1,
+            "boundary_arcs": [
+                {"saddle_id": "SAD_1", "branch_index": 0, "max_id": "MAX_1"}
+            ],
+            "boundary_saddles": ["SAD_1"],
+            "boundary_maxima": ["MAX_1"],
+        }
+    }
+    payload = _export(
+        connection_graph=graph,
+        minimum_basins=basins,
+        max_connections_list=[{"saddle_id": "SAD_1", "max_id": "MAX_1"}],
+        basin_centers_list=[{"id": "MIN_1", "polarity": "minimum"}],
+    )
+
+    metrics = payload["derived_metrics"]
+    assert metrics["connection_graph"] == graph
+    assert metrics["minimum_basins"] == basins
+    assert metrics["max_connections_list"] == [
+        {"saddle_id": "SAD_1", "max_id": "MAX_1"}
+    ]
+    assert metrics["basin_centers_list"] == [{"id": "MIN_1", "polarity": "minimum"}]
+    # A v9 file loads, and the sections pass through untouched (metrics are
+    # outputs: the loader never feeds them back into the pipeline).
+    loaded = load_params_from_dict(payload)
+    assert loaded["derived_metrics"]["minimum_basins"] == basins
+    # schema_version is a top-level key of the exported payload; the restored
+    # params dict carries sections, not the version (the loader consumed it).
+    assert payload["schema_version"] == PARAMS_SCHEMA_VERSION
+
+
+def test_selection_records_the_minimum_end() -> None:
+    """Which minimum's basin was on screen is part of the observation."""
+    payload = _export(selected_minimum_id="MIN_5011")
+
+    assert payload["selection"]["selected_minimum_id"] == "MIN_5011"
+    assert (
+        load_params_from_dict(payload)["selection"]["selected_minimum_id"] == "MIN_5011"
+    )
+
+
+def test_a_v8_file_loads_without_the_basin_sections() -> None:
+    """Schema 9 adds the basin exports; a v8 file has no graph to restore.
+
+    v8 is listed as legacy: its controls come from the defaults, and the
+    derived_metrics section simply has no basin keys -- the absence is the
+    honest record of a snapshot taken before the topology was exportable.
+    """
+    payload = _export(show_all_minimum_basins=True)
+    payload["schema_version"] = 8
+    for key in (
+        "max_connections_list",
+        "basin_centers_list",
+        "connection_graph",
+        "minimum_basins",
+    ):
+        payload["derived_metrics"].pop(key)
+    payload["selection"].pop("selected_minimum_id")
+
+    params = load_params_from_dict(payload)
+
+    assert params["show_all_minimum_basins"] is True
+    assert "minimum_basins" not in params["derived_metrics"]
+    assert "selected_minimum_id" not in params["selection"]
