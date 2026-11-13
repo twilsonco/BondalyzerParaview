@@ -522,6 +522,8 @@ def save_params_to_dict(
         # itself to whatever is on screen, so a saddle-scoped measurement was
         # unreproducible from the file alone.
         "selected_saddle_id": (getattr(state_like, "selected_saddle_id", None) or None),
+        # Basin visualization: the minimum selected for boundary display.
+        "selected_minimum_id": (getattr(state_like, "selected_minimum_id", None) or None),
     }
 
     payload: dict[str, Any] = {

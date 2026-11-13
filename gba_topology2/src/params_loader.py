@@ -160,6 +160,23 @@ def resolve_restore_plan(
     if selected_field is not None:
         controls["selected_field"] = selected_field
 
+    # Extract and restore selection values (they are stored in a separate
+    # dict but need to be applied as state controls). Only restore string-based
+    # ID selections that can be directly assigned; object-based selections
+    # (selected_cp, selected_cluster, etc.) cannot be restored from just their IDs
+    # without looking them up in the pipeline data.
+    selection = params.get("selection")
+    if isinstance(selection, dict):
+        # Restore string ID selections that are stored directly in state
+        id_selections = {
+            "selected_saddle_id": "selected_saddle_id",
+            "selected_minimum_id": "selected_minimum_id",
+        }
+        for sel_key, state_key in id_selections.items():
+            value = selection.get(sel_key)
+            if value is not None:
+                controls[state_key] = value
+
     camera = _resolve_camera(params)
 
     return RestorePlan(
