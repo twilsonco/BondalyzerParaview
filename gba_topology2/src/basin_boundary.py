@@ -7,6 +7,12 @@ saddles instead, and it saturated -- with few saddles every basin claimed the
 same arcs and the same "raise k" advice, a real structure reported as a
 parameter problem. The graph statement -- which saddles drain here -- is what
 the boundary of a basin means.
+
+:func:`find_maximum_basins` is the same rule read from the other end (basin
+v11): a maximum's basin is bounded by the saddle->minimum arcs at the saddles
+whose ASCENT branches climb into that maximum. Negate the field, swap the
+polarities, and the two statements are each other, which is why they share
+their helpers and their shape rather than one being derived from the other.
 """
 
 from collections.abc import Mapping, Sequence
@@ -18,14 +24,19 @@ from gba_topology2.src.basin_center import BasinCenter
 from gba_topology2.src.max_connection import MaxConnection, MinConnection
 
 __all__ = [
+    "MaximumBasin",
     "MinimumBasin",
     "build_connection_graph",
+    "build_descent_graph",
     "connection_from_state_dict",
+    "find_maximum_basins",
     "find_minimum_basins",
     "get_basin_arcs",
+    "get_max_basin_arcs",
     "min_connection_from_state_dict",
     "min_connection_to_state_dict",
     "serialize_connection_graph",
+    "serialize_maximum_basins",
     "serialize_minimum_basins",
 ]
 
@@ -185,6 +196,28 @@ class MinimumBasin:
     boundary_arcs: list[MaxConnection]
 
 
+@dataclass(frozen=True)
+class MaximumBasin:
+    """Represents one maximum's basin boundary.
+
+    The ascent-side mirror of :class:`MinimumBasin` (basin v11). Where a minimum
+    is bounded by the ridgelines that rise out of the saddles draining into it,
+    a maximum is bounded by the valley floors that fall out of the saddles
+    climbing into it -- the same adjacency statement with the two tables
+    exchanged.
+
+    Attributes:
+        maximum_id: Effective maximum CP ID (e.g., "E-MAX_MC17", "MAX_142").
+        boundary_arcs: List of MinConnection objects representing saddle-to-minimum
+            connections emanating from the saddles whose ascent branches climb
+            into this maximum. These arcs collectively form the topological
+            boundary of the maximum's basin.
+    """
+
+    maximum_id: str
+    boundary_arcs: list[MinConnection]
+
+
 def build_connection_graph(
     connections: list[MaxConnection],
 ) -> dict[str, list[MaxConnection]]:
@@ -213,6 +246,36 @@ def build_connection_graph(
             graph[saddle_id] = []
 
         graph[saddle_id].append(conn)
+
+    return graph
+
+
+def build_descent_graph(
+    descent_connections: Sequence[MinConnection],
+) -> dict[str, list[MinConnection]]:
+    """Build adjacency dict from saddle-minimum connections.
+
+    Maps each saddle ID to all its outgoing descent branches. Only includes
+    connected arcs. The descent mirror of :func:`build_connection_graph`, with
+    the same filter (``status == "connected"`` and ``verified``) so a branch the
+    ring did not confirm bounds nothing on either side.
+
+    Args:
+        descent_connections: List of MinConnection objects from
+            :func:`max_connection.connect_seed_to_minima`.
+
+    Returns:
+        Dict[saddle_id, [MinConnection, ...]]. Maps each saddle ID to the list
+        of descent records from that saddle.
+    """
+    graph: dict[str, list[MinConnection]] = {}
+
+    for conn in descent_connections:
+        # Only include connected arcs
+        if conn.status != "connected" or not conn.verified:
+            continue
+
+        graph.setdefault(conn.saddle_id, []).append(conn)
 
     return graph
 
@@ -294,6 +357,84 @@ def find_minimum_basins(
     return basins_dict
 
 
+def find_maximum_basins(
+    connections: list[MaxConnection],
+    basin_centers: list[BasinCenter],
+    descent_connections: Sequence[MinConnection],
+) -> dict[str, MaximumBasin]:
+    """Compute all maximum basin boundaries from the connection topology.
+
+    basin v11, the dual of :func:`find_minimum_basins`: a maximum's basin is
+    bounded by the saddle->minimum arcs at the saddles whose ASCENT branches
+    climb into that maximum. Under ascent the boundary of an attraction region
+    is made of the descending arcs (the stable manifolds of the index-1 saddles
+    on that boundary), exactly as under descent it is made of the ascending
+    ones. Negate the field and the two rules are the same rule, so the
+    implementation mirrors the minimum side step for step -- same signature,
+    the two tables exchanged.
+
+    Which minima the ring drains into is the informative half: the arcs that
+    bound a hill are the valleys that surround it, and they are records the
+    v10 descent connector already measured and never drew.
+
+    Args:
+        connections: The ascent table (all records). This is the ADJACENCY here
+            -- ``max_id`` names which saddles climb into which maximum.
+        basin_centers: List of all basin centers (raw and effective maxima
+            /minima); only the maxima get basins.
+        descent_connections: The descent table from
+            :func:`max_connection.connect_seed_to_minima`, raw (pre-refine;
+            refine is an ascent-side concept). This is the BOUNDARY GEOMETRY
+            here, filtered to connected, verified arcs by
+            :func:`build_descent_graph`.
+
+    Returns:
+        Dict[maximum_id, MaximumBasin] keyed by maximum CP ID. A maximum with
+        no climbing saddle, or whose saddles have no descent records, is absent
+        -- an open boundary is not a basin.
+
+    Raises:
+        ValueError: If topology is malformed.
+    """
+    # Find all maxima
+    maxima = [bc for bc in basin_centers if bc.polarity == "maximum"]
+
+    if not maxima:
+        return {}
+
+    # Boundary geometry: saddle_id -> [MinConnection, ...]
+    graph = build_descent_graph(descent_connections)
+
+    if not graph:
+        return {}
+
+    # The adjacency, off the field: maximum_id -> the saddle_ids that climb into
+    # it. Sorted by saddle id so a basin's arc list depends only on the record
+    # SET, never on the order the caller assembled it.
+    climbs_into: dict[str, set[str]] = {}
+    for asc in connections:
+        if asc.status == "connected" and asc.max_id is not None:
+            climbs_into.setdefault(asc.max_id, set()).add(asc.saddle_id)
+
+    basins_dict: dict[str, MaximumBasin] = {}
+
+    for maximum in maxima:
+        adjacent = climbs_into.get(maximum.center_id, set())
+
+        # Collect all descent arcs from the climbing saddles.
+        boundary_arcs: list[MinConnection] = []
+        for saddle_id in sorted(adjacent):
+            boundary_arcs.extend(graph.get(saddle_id, []))
+
+        if boundary_arcs:
+            basins_dict[maximum.center_id] = MaximumBasin(
+                maximum_id=maximum.center_id,
+                boundary_arcs=boundary_arcs,
+            )
+
+    return basins_dict
+
+
 def get_basin_arcs(basin: MinimumBasin) -> list[MaxConnection]:
     """Extract ordered MaxConnection objects from a basin.
 
@@ -302,6 +443,18 @@ def get_basin_arcs(basin: MinimumBasin) -> list[MaxConnection]:
 
     Returns:
         List of MaxConnection objects in the basin, ordered for rendering.
+    """
+    return basin.boundary_arcs
+
+
+def get_max_basin_arcs(basin: MaximumBasin) -> list[MinConnection]:
+    """Extract ordered MinConnection objects from a maximum's basin.
+
+    Args:
+        basin: A MaximumBasin instance.
+
+    Returns:
+        List of MinConnection objects in the basin, ordered for rendering.
     """
     return basin.boundary_arcs
 
@@ -379,4 +532,47 @@ def serialize_minimum_basins(
             ),
         }
         for min_id, basin in basins.items()
+    }
+
+
+def serialize_maximum_basins(
+    basins: dict[str, MaximumBasin],
+) -> dict[str, dict[str, Any]]:
+    """Convert detected maximum basins to a JSON-safe dict for export.
+
+    The dual of :func:`serialize_minimum_basins` and the same contract: one
+    implementation shared by the viewer's params JSON and ``diagnose_params``'
+    results JSON, boundary id sets SORTED so the JSON is deterministic and diffs
+    across runs compare cleanly. ``boundary_minima`` is the informative field on
+    this side -- the valleys a hill drains into.
+
+    Args:
+        basins: Output of :func:`find_maximum_basins`, mapping each
+            maximum_id to its MaximumBasin.
+
+    Returns:
+        Dict mapping maximum_id to a plain dict with keys ``maximum_id``,
+        ``n_boundary_arcs``, ``boundary_arcs`` (list of
+        ``{saddle_id, branch_index, min_id}`` in basin order),
+        ``boundary_saddles`` (sorted str list) and ``boundary_minima``
+        (sorted str list, ``None`` endpoints dropped).
+    """
+    return {
+        max_id: {
+            "maximum_id": basin.maximum_id,
+            "n_boundary_arcs": len(basin.boundary_arcs),
+            "boundary_arcs": [
+                {
+                    "saddle_id": arc.saddle_id,
+                    "branch_index": arc.branch_index,
+                    "min_id": arc.min_id,
+                }
+                for arc in basin.boundary_arcs
+            ],
+            "boundary_saddles": sorted({arc.saddle_id for arc in basin.boundary_arcs}),
+            "boundary_minima": sorted(
+                {arc.min_id for arc in basin.boundary_arcs if arc.min_id is not None}
+            ),
+        }
+        for max_id, basin in basins.items()
     }
