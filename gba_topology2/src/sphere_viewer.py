@@ -18,7 +18,7 @@ import json
 import math
 import os
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -76,13 +76,16 @@ if workspace_root not in sys.path:
 from BondalyzerParaView.plt_gba_to_vtm import extract_gba_zones_from_plt
 from BondalyzerParaView.trame_viewer import get_display_title, get_robust_scalar_bounds
 from gba_topology2.src.basin_boundary import (
+    MaximumBasin,
+    MinimumBasin,
     build_connection_graph,
     connection_from_state_dict,
+    find_maximum_basins,
     find_minimum_basins,
-    get_basin_arcs,
     min_connection_from_state_dict,
     min_connection_to_state_dict,
     serialize_connection_graph,
+    serialize_maximum_basins,
     serialize_minimum_basins,
 )
 from gba_topology2.src.basin_center import (
@@ -387,9 +390,16 @@ def _state_str(value: object, name: str) -> str:
 
 
 # Basin-overlay toggles: switches that re-draw the arc actor from the connections
-# ALREADY computed, so they are view-only and must not rebuild the pipeline.
+# ALREADY computed, so they are view-only and must not rebuild the pipeline. Both
+# polarities are pure overlay (basin v11), so both pairs live here: a maximum's
+# ring is built from the descent table, which these toggles never touch.
 BASIN_ONLY_TOGGLES: frozenset[str] = frozenset(
-    {"show_basin_for_selected_minimum", "show_all_minimum_basins"}
+    {
+        "show_basin_for_selected_minimum",
+        "show_all_minimum_basins",
+        "show_basin_for_selected_maximum",
+        "show_all_maximum_basins",
+    }
 )
 
 
@@ -412,6 +422,260 @@ def is_basin_only_change(changed: Iterable[str]) -> bool:
     """
     keys = set(changed)
     return bool(keys) and keys <= BASIN_ONLY_TOGGLES
+
+
+# basin v11 -- the two gate constants, one per polarity, and the colour each
+# polarity's ring is drawn in. They live at module scope, not inside the drawing
+# closure, because the drawer, the classifier and the tests must agree on them:
+# a gate that only the screen knows is a gate that cannot be explained.
+#
+# MAX keeps the 0.5 the v10 minimum side invented, so a hill and a valley are
+# judged by one number; the name says what it gates (a ring, not a proximity
+# search). MIN is None ("no gate") because giving the minimum side a real gate
+# would change v10's rendered output, which is Unit D's scope, not this one.
+MAX_BASIN_GATE_DEG: float = 0.5
+MIN_BASIN_GATE_DEG: float | None = None
+
+# The ring is drawn in the colour of the centre it bounds, so a hill's basin
+# reads as a hill (purple, the maximum glyph) and a valley's stays gold.
+MIN_BASIN_RING_COLOR: tuple[float, float, float] = (1.0, 0.84, 0.0)
+MAX_BASIN_RING_COLOR: tuple[float, float, float] = (0.294, 0.0, 0.514)
+
+# A raycast arc is a RAY, not a ring. On the maximum side these are the hits
+# that mean the hill has no closed boundary: a ray that stops on a saddle falls
+# straight through it (the stable manifold passes through, there is no shell
+# there to hide anything), while a ray captured by a MAXIMUM is the ascent-side
+# mirror of the saddle raycast that already occludes a minimum's basin.
+RAYCAST_OCCLUDERS: frozenset[str] = frozenset({"saddle", "maximum"})
+
+
+def basin_ring_gate_deg(polarity: str) -> float | None:
+    """The closure gate for one polarity, as one lookup for both call sites.
+
+    The drawer and the classifier read the gate through this function so the
+    pair cannot drift: a 0.5 on the screen and a 0.35 in the warning would
+    diagnose a basin the drawing calls closed.
+
+    Args:
+        polarity: ``"minimum"`` or ``"maximum"``.
+
+    Returns:
+        The gate in degrees, or ``None`` when that polarity is ungated (the
+        minimum side, pinned to v10's behaviour).
+    """
+    return MAX_BASIN_GATE_DEG if polarity == "maximum" else MIN_BASIN_GATE_DEG
+
+
+def basin_ring_color(polarity: str) -> tuple[float, float, float]:
+    """The colour of one polarity's basin ring.
+
+    Args:
+        polarity: ``"minimum"`` or ``"maximum"``.
+
+    Returns:
+        An RGB triple for ``vtkProperty.SetColor``.
+    """
+    return MAX_BASIN_RING_COLOR if polarity == "maximum" else MIN_BASIN_RING_COLOR
+
+
+def basin_stats_template(polarity: str) -> str:
+    """The drawer's one-line summary template for one basin polarity group.
+
+    The Vue string is built here rather than inlined twice in the layout so the
+    two panels cannot drift, and because the interpolation braces are literal
+    Vue syntax that an f-string would eat. Every value comes from
+    :func:`classify_basin_connection`, which is also what gated the drawing.
+
+    Args:
+        polarity: ``"minimum"`` or ``"maximum"``.
+
+    Returns:
+        A dash/dcc ``html.Div`` children string.
+    """
+    short = "min" if polarity == "minimum" else "max"
+    label = "Minimum basins" if polarity == "minimum" else "Maximum basins"
+    return (
+        f"{label}: {{{{ len(active_{short}_basins) }}}}"
+        f" | bound: {{{{ basin_group_stats['{polarity}']['status'] }}}}"
+        f" | rings: {{{{ basin_group_stats['{polarity}']['n_rings'] }}}}"
+        f" | rays: {{{{ basin_group_stats['{polarity}']['n_rays'] }}}}"
+        f" | min sep: {{{{ basin_group_stats['{polarity}']['min_sep_text'] }}}}"
+        f" | gate: {{{{ basin_group_stats['{polarity}']['gate_text'] }}}}"
+    )
+
+
+def occludes(occluder: str, center: str) -> bool:
+    """Decide whether one attractor's shell hides one basin centre.
+
+    A minimum's stable shell is the INNER one (a hill sits inside a valley), so
+    it never hides a maximum's ring; a maximum's shell is the OUTER one, so it
+    does. Rays are excluded here except on the maximum side, where a raycast hit
+    on one of :data:`RAYCAST_OCCLUDERS` is the ascent-side mirror of the saddle
+    raycast that already occludes a minimum's basin. The endpoint is NOT an
+    occluder: a basin's boundary arcs terminate on the very centre they bound.
+
+    Args:
+        occluder: The polarity of the attractor whose shell may hide: the ring's
+            centre, or a ray's hit kind.
+        center: The polarity of the basin centre being tested.
+
+    Returns:
+        ``True`` when the occluder's shell draws over ``center``'s ring.
+    """
+    if occluder == center:
+        return False
+    if center == "minimum":
+        return True
+    return occluder in RAYCAST_OCCLUDERS
+
+
+def basin_draw_order(rings: Iterable[Mapping[str, Any]]) -> list[str]:
+    """Order the visible basin groups, deepest shell first.
+
+    One event per occlusion: a group is dropped when any ring of the opposite
+    polarity occludes it, evaluated over the FULL set before anything is drawn
+    (decisions are not interleaved with drawing, so the order the groups happen
+    to be emitted in cannot change which ones survive). A group whose ring set
+    is empty is never visible and never occludes -- an open hill does not hide a
+    valley.
+
+    Args:
+        rings: Render rows, each with ``polarity`` (the centre it bounds) and
+            ``kind`` (``"ring"`` or ``"ray"``).
+
+    Returns:
+        The polarity group names to draw, minimum basins first: the minimum
+        side, which has been on screen since v10, keeps z-order primacy.
+    """
+    rows = list(rings)
+    visible: list[str] = []
+    for center in ("minimum", "maximum"):
+        mine = [
+            r for r in rows if r.get("polarity") == center and r.get("kind") == "ring"
+        ]
+        if not mine:
+            continue
+        others = [
+            r for r in rows if r.get("polarity") != center and r.get("kind") == "ring"
+        ]
+        if any(occludes(str(o.get("polarity", "")), center) for o in others):
+            continue
+        visible.append(center)
+    return visible
+
+
+def classify_basin_connection(
+    center_polarity: str,
+    rows: Iterable[Mapping[str, Any]],
+    gate_deg: float | None,
+) -> dict[str, Any]:
+    """Classify one basin's connectivity from its projected arcs.
+
+    The single source of truth for the render gate and the drawer's warning
+    text: the same function computes both, so the message never contradicts the
+    geometry on screen. A basin of a minimum is what v10 drew -- no gate at all
+    -- and the None gate means every separation is above it. A basin of a
+    maximum is bounded by RINGS; raycast arcs are not a basin, so the gate
+    applies to ring pairs only and a basin with no ring pair is UNBOUNDED, which
+    draws nothing (see the plan's acceptance test: a 1.0 deg ring pair warns, it
+    does not withhold the ring).
+
+    Args:
+        center_polarity: ``"minimum"`` or ``"maximum"``.
+        rows: Projected render rows for the selected centre (see
+            :func:`project_basin_arcs`).
+        gate_deg: The closure gate in degrees, or None for no gate.
+
+    Returns:
+        A summary dict: ``status`` (``"bounded"`` / ``"unbounded"`` /
+        ``"no_basin"``), ``n_rings``, ``n_rays``, ``unbounded``, ``warnings,
+        ``reason`` (empty when bounded), ``min_separation_deg`` (over the ring
+        pairs), and ``ring_gate_deg`` (0.5 for a maximum, None for a minimum --
+        the asymmetry, visible in the payload).
+    """
+    arcs = list(rows)
+    ring_rows = [r for r in arcs if r.get("kind") == "ring"]
+    ray_rows = [r for r in arcs if r.get("kind") == "ray"]
+    label = "Basin" if center_polarity == "minimum" else "Maximum basin"
+
+    warnings: list[str] = []
+    unbounded = False
+    # The gate reads the ring set, ring_saddles, and min_separation over the
+    # ring pairs. Inclusion is by SEPARATION, not by the endpoint's stored
+    # polarity: a geodesic arc whose separation exceeds its own port gate records
+    # as a ray, and excluding those from the gate on the minimum side would make
+    # a raycast-only basin read as unbounded -- v10 draws it, so it stays
+    # bounded. A minimum's gate is None, so every separation passes.
+    seps = sorted(
+        float(r["separation_deg"])
+        for r in ring_rows
+        if r.get("separation_deg") is not None
+    )
+    min_sep = max((seps[i + 1] - seps[i] for i in range(len(seps) - 1)), default=None)
+
+    if not arcs:
+        status = "no_basin"
+        reason = (
+            f"basin of a {center_polarity} draws nothing: "
+            "a ring that bounds this centre exists on the other polarity"
+        )
+        return {
+            "status": status,
+            "n_rings": 0,
+            "n_rays": 0,
+            "unbounded": False,
+            "warnings": warnings,
+            "reason": reason,
+            "min_separation_deg": None,
+            "ring_gate_deg": gate_deg,
+            # On EVERY return path, including this one. The panel binds
+            # `min_sep_text` and `gate_text` unconditionally, so omitting them here
+            # leaves both boxes blank exactly in the state where the reader most
+            # wants a number -- the group that drew no separatrix at all. "n/a" is
+            # what every other empty case already says.
+            "min_sep_text": "n/a",
+            "gate_text": "none" if gate_deg is None else f"{gate_deg:.2f}°",
+        }
+
+    if not ring_rows and ray_rows:
+        # Bounded with a warning on BOTH sides. The minimum side has never
+        # withheld a raycast-only ring, and the maximum side's gate is about
+        # separation, not about the existence of a ring.
+        warnings.append(
+            f"{label} is bounded by raycast arcs only; the basin is not closed"
+        )
+        status = "bounded"
+    elif ray_rows == [] and ring_rows:
+        warnings.append(f"{label} has no rays; its basin is unbounded")
+        status = "bounded"
+    else:
+        status = "bounded"
+
+    if gate_deg is not None and min_sep is not None and min_sep < gate_deg:
+        # The warning fires where v10 SILENTLY DROPS the ring.
+        warnings.append(
+            f"{label} is connected {min_sep:.1f}° apart; "
+            f"basin closure needs a gate of at least {gate_deg:.1f}°"
+        )
+
+    if center_polarity == "maximum" and not ring_rows:
+        unbounded = True
+        status = "unbounded"
+
+    return {
+        "status": status,
+        "n_rings": len(ring_rows),
+        "n_rays": len(ray_rows),
+        "unbounded": unbounded,
+        "warnings": warnings,
+        "reason": "" if not unbounded else f"no ring bounds this {center_polarity}",
+        "min_separation_deg": min_sep,
+        "ring_gate_deg": gate_deg,
+        # Preformatted for the drawer: a Vue template cannot format a float, and
+        # an unformatted None renders as "None" on a diagnostics panel.
+        "min_sep_text": "n/a" if min_sep is None else f"{min_sep:.3f}°",
+        "gate_text": "none" if gate_deg is None else f"{gate_deg:.2f}°",
+    }
 
 
 def _parse_aux_radius(aux: dict[str, Any]) -> float | None:
@@ -2243,14 +2507,35 @@ def run_sphere_viewer(
     # Minimum basin boundaries: lazily computed cycles enclosing minima
     state.show_basin_for_selected_minimum = False
     state.show_all_minimum_basins = False
+    # Maximum basin boundaries (basin v11): the same rule read from the other
+    # end, so the same four pieces of state exist on this side. Defaults are
+    # False on BOTH sides -- a maximum's ring is drawn only when asked.
+    state.show_basin_for_selected_maximum = False
+    state.show_all_maximum_basins = False
     state.selected_minimum_id = None
+    # The selected maximum, named so the selection-driven basin toggles can find
+    # the basin of the CP on screen. The center itself is state.selected_basin_center.
+    state.selected_maximum_id = None
     state.minimum_basins_cache = None  # dict[str, MinimumBasin] | None
+    # basin v11 render truth (the four lists + the summary the drawer and the
+    # classifier share). The MIN keys are the side that has existed since v10;
+    # the MAX keys are this unit's addition, and the pair is what occlusion
+    # orders. basin_groups is deliberately absent: vtkActors are not JSON-safe.
+    state.active_min_basins = []
+    state.min_basin_arcs = []
+    state.active_max_basins = []
+    state.max_basin_arcs = []
+    state.basin_group_stats = {"minimum": {}, "maximum": {}}
+    state.maximum_basins_cache = None  # dict[str, MaximumBasin] | None
+    state.active_max_basins = []
+    state.max_basin_arcs = []
     # JSON-safe exports of the basin topology, written when the cache computes
     # and cleared when the arc table rebuilds. SAVE PARAMETERS copies these
     # into derived_metrics (PARAM_METRIC_KEYS); None means "never computed", so
     # a saved file distinguishes "no basins" from "basins not derived".
     state.connection_graph = None
     state.minimum_basins = None
+    state.maximum_basins = None
     # Absolute path of the most recent "Save Parameters" JSON, for the
     # drawer confirmation chip. Export-only: deliberately absent from
     # DEFAULT_UI_STATE and the @state.change decorator (it triggers no
@@ -3192,14 +3477,33 @@ def run_sphere_viewer(
         ]
         # The arc table is the raw material of the basin topology; a rebuild
         # invalidates every derived structure, so the exported graph can never
-        # lag behind the exported arcs.
+        # lag behind the exported arcs. maximum_basins_cache is the new entry on
+        # this list; leaving it out is how a recompute ends up drawing a hill's
+        # ring around last run's saddles.
         state.minimum_basins_cache = None
+        state.maximum_basins_cache = None
         state.connection_graph = None
         state.minimum_basins = None
+        state.maximum_basins = None
+        # The basin overlay is drawn from the tables that just went away, so it
+        # goes with them -- both groups, in both their switches' states. The
+        # selection refresh below redraws the side that is still selected.
+        state.min_basin_arcs = []
+        state.max_basin_arcs = []
+        state.active_min_basins = []
+        state.active_max_basins = []
+        _set_basin_visible("minimum", [])
+        _set_basin_visible("maximum", [])
         # The selection overlay is selection-driven, so a rebuild has to refresh
         # it: the arcs drawn for the currently selected maximum are gone with the
         # old table until this runs.
         select_basin_center(state.selected_basin_center)
+        # The basin groups are selection-driven by the same argument, and they
+        # are NOT covered by the line above: select_basin_center emits the
+        # selection overlay, not the basin rings. Without this refresh a
+        # recompute leaves the rings of the previous parameter set on screen,
+        # which is exactly the failure v10 spent a release eliminating.
+        _refresh_basin_overlays()
 
         n_raw_hidden = len(hidden_vertex_ids)
         state.display_counts = {
@@ -3651,10 +3955,17 @@ def run_sphere_viewer(
         # the branches arriving at it, naming a saddle shows those leaving it.
         # Selecting one clears the other so the drawer table and the scene agree.
         state.selected_saddle_id = None
-        # Update selected_minimum_id so basin boundary toggles can find the right basin
+        # Update selected_minimum_id / selected_maximum_id so the basin boundary
+        # toggles can find the right basin on EITHER side. Both sides name their
+        # centre the same way, because both sides are the same overlay.
         state.selected_minimum_id = (
             basin_item["id"]
             if basin_item is not None and basin_item.get("polarity") == "minimum"
+            else None
+        )
+        state.selected_maximum_id = (
+            basin_item["id"]
+            if basin_item is not None and basin_item.get("polarity") == "maximum"
             else None
         )
         if basin_item is None:
@@ -3671,9 +3982,22 @@ def run_sphere_viewer(
             if basin_item is not None and basin_item.get("polarity") == "maximum"
             else None
         )
-        # Trigger basin visualization if "Show Basin Boundary For Selected Minimum" is enabled
+        # Trigger basin visualization if "Show Basin Boundary For Selected Minimum"
+        # is enabled. Both polarities are selection-driven overlays now (basin
+        # v11), so selecting a maximum starts drawing its basin under its own
+        # switch, exactly as the minimum side has since v10. The two calls are
+        # independent -- each writes only its group's render truth -- and the
+        # occlusion pass in _apply_basin_groups orders them, so a CP that is
+        # inside the basin it bounds is not a bug on either side.
         if state.show_basin_for_selected_minimum:
             compute_and_show_basin(state.selected_minimum_id)
+        if state.show_basin_for_selected_maximum:
+            compute_and_show_max_basin(state.selected_maximum_id)
+        if (
+            not state.show_basin_for_selected_minimum
+            and not state.show_basin_for_selected_maximum
+        ):
+            _apply_basin_groups()
         render_window.Render()
         request_view_update()
 
@@ -3828,6 +4152,20 @@ def run_sphere_viewer(
         except (ValueError, TypeError, RuntimeError) as e:
             print(f"[sphere_viewer] Picking error: {e}")
 
+    def _refresh_basin_overlays() -> None:
+        """Redraw both basin groups from the current tables and toggles.
+
+        Both polarities, always: each compute function writes only its own
+        group's render truth, and the occlusion pass in :func:`_apply_basin_groups`
+        needs BOTH groups present to order them -- calling one side alone would
+        let a maximum's ring occlude a minimum's basin that is not on screen.
+        Every basin entry point funnels through here (the basin-only toggle
+        batch, the post-rebuild refresh) so the pair cannot be half-refreshed by
+        one of them forgetting the new switch.
+        """
+        compute_and_show_basin(state.selected_minimum_id)
+        compute_and_show_max_basin(state.selected_maximum_id)
+
     @state.change(
         "selected_field",
         "show_flood",
@@ -3859,6 +4197,11 @@ def run_sphere_viewer(
         "probe_ridge_points",
         "show_basin_for_selected_minimum",
         "show_all_minimum_basins",
+        # basin v11: watched keys, not just UI labels. A switch that is in
+        # BASIN_ONLY_TOGGLES but missing here never reaches on_param_change, so
+        # toggling it draws nothing.
+        "show_basin_for_selected_maximum",
+        "show_all_maximum_basins",
     )
     def on_param_change(**kwargs: Any) -> None:
         if suppress_param_change:
@@ -3873,10 +4216,10 @@ def run_sphere_viewer(
         # draws, then update_field erases. Basin-only batches draw and return;
         # every rebuild re-applies the overlay on top of the fresh arcs.
         if is_basin_only_change(kwargs):
-            compute_and_show_basin(state.selected_minimum_id)
+            _refresh_basin_overlays()
             return
         update_field()
-        compute_and_show_basin(state.selected_minimum_id)
+        _refresh_basin_overlays()
 
     @ctrl.add("reset_defaults")
     def reset_defaults() -> None:
@@ -4212,6 +4555,366 @@ def run_sphere_viewer(
     def clear_basin_center_selection() -> None:
         select_basin_center(None)
 
+    def _rehydrate_ascent_rows() -> list[MaxConnection]:
+        """Rebuild the ascent table from its JSON rows.
+
+        The rehydrator is dataclass-driven and None-safe: a stored null on an
+        Optional field (``cross_track_deg`` = "nothing was hit") is a legitimate
+        value, and the hand-written ``float(get(...))`` it replaced turned every
+        such row into a swallowed TypeError — silently emptying the arc table so
+        no basin rings existed.
+
+        Returns:
+            One MaxConnection per row; a row that cannot be read is dropped
+            LOUDLY, per row, because a dropped arc changes the topology and a
+            silent drop made a 4-of-4 failure look like a field with no
+            connections at all.
+        """
+        conns: list[MaxConnection] = []
+        for conn_dict in _state_list(
+            state.max_connections_list, "max_connections_list"
+        ):
+            try:
+                conns.append(connection_from_state_dict(conn_dict))
+            except (KeyError, ValueError, TypeError) as exc:
+                print(
+                    "[sphere_viewer] basin topology: dropped arc "
+                    f"{conn_dict.get('saddle_id', '?')}"
+                    f"[{conn_dict.get('branch_index', '?')}]: {exc}"
+                )
+        return conns
+
+    def _rehydrate_descent_rows() -> list[MinConnection]:
+        """Rebuild the descent table (basin v10's adjacency) from its JSON rows.
+
+        Returns:
+            One MinConnection per row, with the same loud per-row drop as
+            :func:`_rehydrate_ascent_rows`.
+        """
+        descents: list[MinConnection] = []
+        for desc_dict in _state_list(
+            state.min_connections_list, "min_connections_list"
+        ):
+            try:
+                descents.append(min_connection_from_state_dict(desc_dict))
+            except (KeyError, ValueError, TypeError) as exc:
+                print(
+                    "[sphere_viewer] basin topology: dropped descent "
+                    f"{desc_dict.get('saddle_id', '?')}"
+                    f"[{desc_dict.get('branch_index', '?')}]: {exc}"
+                )
+        return descents
+
+    def _basin_center_objects() -> list[BasinCenter]:
+        """Rebuild the basin-center pool from the UI rows.
+
+        One builder for both polarities, so the two sides of the duality cannot
+        disagree about what a center is.
+
+        Returns:
+            Every basin center, raw and effective, in table order.
+        """
+        return [
+            BasinCenter(
+                center_id=str(bc.get("id", "")),
+                polarity=str(bc.get("polarity", "maximum")),
+                position=tuple(bc.get("position", (0.0, 0.0, 0.0))),  # type: ignore
+                value=float(bc.get("value", 0.0)),
+                is_effective=bool(bc.get("is_effective", False)),
+                vertex_id=int(bc.get("vertex_id", -1)),
+                origin_id=(str(bc["origin_id"]) if bc.get("origin_id") else None),
+                net_index=int(bc.get("net_index", 1)),
+                member_count=int(bc.get("member_count", 1)),
+            )
+            for bc in _state_list(state.basin_centers_list, "basin_centers_list")
+        ]
+
+    # basin v11 render groups: the actor sets, keyed by basin-centre polarity.
+    # A closure local, NOT state: vtkActors are not JSON-safe, and `state` is
+    # serialized into SAVE PARAMETERS. The renderer's actor list is the draw
+    # order, so "which group is visible" is a question about the contents of
+    # these two lists, and swapping a group's actors is the occlusion rule.
+    basin_groups: dict[str, list[vtkActor]] = {"minimum": [], "maximum": []}
+
+    def _basin_group_geometry(
+        polarity: str,
+        rows: Sequence[Mapping[str, Any]],
+    ) -> vtkPolyData:
+        """Build one basin group's polylines from its projected rows.
+
+        The geometry pipeline is the arc pipeline: a centred polyline lifted 2%
+        off the sphere and mapped about the nucleus, because the arcs arrive in
+        the world frame. One polydata per polarity group is what makes a group
+        swap cheap: the group is an actor, and an actor is what a renderer
+        removes.
+
+        Args:
+            polarity: The basin centre's polarity, for the lift (identical for
+                both sides) -- kept as an argument so the caller's intent is
+                explicit at every site.
+            rows: Projected render rows, each carrying ``arc_points``.
+
+        Returns:
+            A polydata holding every arc, empty when there are none.
+        """
+        pts = vtkPoints()
+        cells = vtkCellArray()
+        for row in rows:
+            points = list(row.get("arc_points") or [])
+            if len(points) < 2:
+                continue
+            base = pts.GetNumberOfPoints()
+            for p in points:
+                lifted = to_global(
+                    radial_offset(to_local(p, session.center), 1.020),
+                    session.center,
+                )
+                pts.InsertNextPoint(lifted[0], lifted[1], lifted[2])
+            cells.InsertNextCell(len(points))
+            for k in range(len(points)):
+                cells.InsertCellPoint(base + k)
+        poly = vtkPolyData()
+        poly.SetPoints(pts)
+        poly.SetLines(cells)
+        poly.Modified()
+        return poly
+
+    def _set_basin_visible(polarity: str, rows: Sequence[Mapping[str, Any]]) -> None:
+        """Swap one basin group's actors in the renderer (not a visibility flip).
+
+        Removing and re-adding is the whole occlusion mechanism: VTK draws
+        actors in the order they were added, so a group that is not in the
+        renderer cannot hide anything, and a group that is drawn second sits on
+        top. A visibility flip would leave the hidden group's actors in the
+        depth buffer, which is exactly the bug the occlusion rule exists to fix.
+
+        Args:
+            polarity: The basin centre's polarity whose group is being replaced.
+            rows: Projected rows to draw; empty removes the group entirely.
+        """
+        group = basin_groups[polarity]
+        for actor in group:
+            renderer.RemoveActor(actor)
+        group.clear()
+        if not rows:
+            return
+        poly = _basin_group_geometry(polarity, rows)
+        if poly.GetNumberOfLines() == 0:
+            return
+        mapper = vtkPolyDataMapper()
+        mapper.SetInputData(poly)
+        actor = vtkActor()
+        actor.SetMapper(mapper)
+        actor.GetProperty().SetColor(*basin_ring_color(polarity))
+        actor.GetProperty().SetLineWidth(3.0)
+        renderer.AddActor(actor)
+        group.append(actor)
+
+    def _project_basin_arcs(
+        center_polarity: str,
+        basin_rows: Iterable[Mapping[str, Any]],
+        arc_rows: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Turn serialized basin rows into drawable, classifiable render rows.
+
+        A basin's serialized boundary arcs name ``(saddle_id, branch_index)`` and
+        nothing else; the polyline lives in the connection table. This joins them
+        and tags every arc with the two facts the gate and the occlusion rule
+        need, so neither the drawer nor the classifier re-derives them:
+
+        * ``kind`` -- a RING reaches an endpoint with a measured separation; a
+          RAY is a branch that left the saddle and never closed (the endpoint is
+          null, or the arc was chased by the gradient fallback).
+        * ``occluders`` -- the attractors whose stable shell hides a basin of the
+          opposite polarity. A ring terminating on a MAXIMUM occludes; a ring on
+          a minimum is the inner shell and does not, for the same reason the
+          center CP inside its own occluding shell is a no-op. A ray's occluder
+          is its HIT, never its endpoint.
+
+        Args:
+            center_polarity: ``"minimum"`` or ``"maximum"`` -- which side of the
+                duality these basins belong to.
+            basin_rows: Serialized basins (``serialize_minimum_basins`` /
+                ``serialize_maximum_basins`` values) for the centres on screen.
+            arc_rows: The connection table rows carrying ``arc_points`` for those
+                (saddle, branch) keys.
+
+        Returns:
+            One row per boundary arc, in basin order, each with the arc's own
+            ``polarity`` (the centre it bounds) for the group split.
+        """
+        by_key = {
+            (str(r.get("saddle_id", "")), int(r.get("branch_index", 0))): r
+            for r in arc_rows
+        }
+        out: list[dict[str, Any]] = []
+        for basin in basin_rows:
+            for arc in basin.get("boundary_arcs") or []:
+                key = (str(arc.get("saddle_id", "")), int(arc.get("branch_index", 0)))
+                src = by_key.get(key)
+                if src is None:
+                    # The basin names an arc the table no longer has: a stale
+                    # cache against a rebuilt table. Loud, because a ring that
+                    # silently loses one side reads as a smaller basin.
+                    print(
+                        "[sphere_viewer] basin projection: no arc for "
+                        f"{key[0]}[{key[1]}] in basin {center_polarity}"
+                    )
+                    continue
+                endpoint = arc.get("min_id") or arc.get("max_id")
+                separation = src.get("separation_deg")
+                hit = src.get("failure_gate")
+                ring = endpoint is not None and separation is not None
+                occluders: list[str] = []
+                if ring:
+                    # The far end of a ring arc is the OTHER polarity's attractor:
+                    # a basin of a minimum is bounded by arcs that climb to a
+                    # maximum, and those maxima are what hide a maximum's ring.
+                    if center_polarity == "minimum":
+                        occluders = ["maximum"]
+                elif hit in RAYCAST_OCCLUDERS:
+                    occluders = [str(hit)]
+                out.append(
+                    {
+                        "saddle_id": key[0],
+                        "branch_index": key[1],
+                        "polarity": center_polarity,
+                        "endpoint_id": endpoint,
+                        "separation_deg": separation,
+                        "kind": "ring" if ring else "ray",
+                        "occluders": occluders,
+                        "verified": bool(src.get("verified", False)),
+                        "method": str(src.get("method", "geodesic")),
+                        "arc_points": [list(p) for p in (src.get("arc_points") or [])],
+                    }
+                )
+        return out
+
+    def _classify_basin_group(polarity: str) -> dict[str, Any]:
+        """Classify the basin group of one polarity, from the render truth.
+
+        Thin wrapper so the drawer and the classifier read the SAME list
+        (``state.min_basin_arcs`` / ``state.max_basin_arcs``) -- the screen shows
+        exactly what the warning describes, which is the entire point of
+        computing the two in one function.
+
+        Args:
+            polarity: The basin centre's polarity.
+
+        Returns:
+            The :func:`classify_basin_connection` summary for that group.
+        """
+        rows = _state_list(
+            state.max_basin_arcs if polarity == "maximum" else state.min_basin_arcs,
+            f"{polarity}_basin_arcs",
+        )
+        return classify_basin_connection(polarity, rows, basin_ring_gate_deg(polarity))
+
+    def _apply_basin_groups() -> None:
+        """Draw both basin groups in the occlusion order, then report.
+
+        One pass over the full set (see :func:`basin_draw_order`): which groups
+        are visible is decided before anything is drawn, so a maximum ring hiding
+        a minimum ring is one event with one message, not two interleaved
+        drawing decisions.
+        """
+        rows: dict[str, list[dict[str, Any]]] = {
+            "minimum": _state_list(state.min_basin_arcs, "min_basin_arcs"),
+            "maximum": _state_list(state.max_basin_arcs, "max_basin_arcs"),
+        }
+        # A group is on screen when EITHER of its two switches is on: the
+        # selection-driven one (which draws only the selected centre's basin, and
+        # is filtered out of `rows` by the compute function) and the
+        # show-all one. The keys are the real toggle names, not a paraphrase.
+        show: dict[str, bool] = {
+            "minimum": bool(state.show_basin_for_selected_minimum)
+            or bool(state.show_all_minimum_basins),
+            "maximum": bool(state.show_basin_for_selected_maximum)
+            or bool(state.show_all_maximum_basins),
+        }
+        visible: dict[str, list[dict[str, Any]]] = {"minimum": [], "maximum": []}
+        ring_rows = [r for g in rows.values() for r in g]
+        for polarity in basin_draw_order(ring_rows):
+            if show[polarity]:
+                visible[polarity] = rows[polarity]
+        for polarity in ("minimum", "maximum"):
+            _set_basin_visible(polarity, visible[polarity])
+        # The render truth the drawer and the classifier report from, written
+        # back as the per-polarity active-basin id lists the UI counts.
+        for polarity in ("minimum", "maximum"):
+            ids = sorted({str(r.get("endpoint_id")) for r in visible[polarity]})
+            if polarity == "maximum":
+                state.active_max_basins = ids
+            else:
+                state.active_min_basins = ids
+        # The counts the drawer prints, computed once from what was drawn.
+        state.basin_group_stats = {
+            "minimum": classify_basin_connection(
+                "minimum", visible["minimum"], basin_ring_gate_deg("minimum")
+            ),
+            "maximum": classify_basin_connection(
+                "maximum", visible["maximum"], basin_ring_gate_deg("maximum")
+            ),
+        }
+
+    @ctrl.add("compute_and_show_max_basin")
+    def compute_and_show_max_basin(maximum_id: str | None = None) -> None:
+        """Lazily compute a maximum's basin boundary and draw it (basin v11).
+
+        The mirror of :func:`compute_and_show_basin`, down to the lazily filled
+        cache and the export written beside it: the adjacency comes from the
+        ASCENT table (which saddles climb into this maximum) and the boundary
+        geometry is the DESCENT table (the saddle->minimum arcs that fall away
+        from them). Both tables are rehydrated by the shared helpers, so a null
+        on an Optional field is a value here, as it is on the minimum side.
+
+        Args:
+            maximum_id: Maximum CP ID to show, or None for "show all" mode.
+        """
+        if state.maximum_basins_cache is None:
+            conn_objs = _rehydrate_ascent_rows()
+            descent_objs = _rehydrate_descent_rows()
+            centers = _basin_center_objects()
+            try:
+                state.maximum_basins_cache = find_maximum_basins(
+                    conn_objs, centers, descent_objs
+                )
+            except (ValueError, Exception):
+                state.maximum_basins_cache = {}
+            # Export the topology the render below draws, with the shared
+            # serializers, so a saved params file and a diagnose_params results
+            # file diff field-for-field against each other on BOTH sides. The
+            # minimum side's export is left to compute_and_show_basin, which
+            # already owns it; only the new key is written here.
+            state.maximum_basins = serialize_maximum_basins(state.maximum_basins_cache)
+
+        cache = state.maximum_basins_cache or {}
+        drawn_ids: list[str] = []
+        if state.show_all_maximum_basins:
+            drawn_ids = sorted(cache)
+        elif (
+            state.show_basin_for_selected_maximum
+            and maximum_id is not None
+            and maximum_id in cache
+        ):
+            drawn_ids = [maximum_id]
+        drawn_basins: list[MaximumBasin] = [cache[mid] for mid in drawn_ids]
+
+        basin_rows = list(
+            serialize_maximum_basins({b.maximum_id: b for b in drawn_basins}).values()
+        )
+        state.max_basin_arcs = _project_basin_arcs(
+            "maximum",
+            basin_rows,
+            _state_list(state.min_connections_list, "min_connections_list"),
+        )
+        _apply_basin_groups()
+        stats = state.basin_group_stats or {}
+        for warning in stats.get("maximum", {}).get("warnings", []):
+            print(f"[sphere_viewer] {warning}")
+        render_window.Render()
+        request_view_update()
+
     @ctrl.add("compute_and_show_basin")
     def compute_and_show_basin(minimum_id: str | None = None) -> None:
         """Lazily compute basin boundary and update visualization.
@@ -4232,63 +4935,12 @@ def run_sphere_viewer(
         """
         # Lazily compute basins if not cached
         if state.minimum_basins_cache is None:
-            connections = _state_list(
-                state.max_connections_list, "max_connections_list"
-            )
-            # Convert dicts back to MaxConnection objects for processing.
-            # The rehydrator is dataclass-driven and None-safe: a stored null
-            # on an Optional field (cross_track_deg = "nothing was hit") is a
-            # legitimate value, and the hand-written float(get(...)) it
-            # replaced turned every such row into a swallowed TypeError —
-            # silently emptying the arc table so no basin rings existed.
-            conn_objs: list[MaxConnection] = []
-            for conn_dict in connections:
-                try:
-                    conn_objs.append(connection_from_state_dict(conn_dict))
-                except (KeyError, ValueError, TypeError) as exc:
-                    # Loud, per-row: a dropped arc changes the topology, and
-                    # a silent drop made a 4-of-4 failure look like a field
-                    # with no connections at all.
-                    print(
-                        "[sphere_viewer] basin topology: dropped arc "
-                        f"{conn_dict.get('saddle_id', '?')}"
-                        f"[{conn_dict.get('branch_index', '?')}]: {exc}"
-                    )
-
+            conn_objs = _rehydrate_ascent_rows()
             # basin v10: the descent table, rehydrated exactly like the arcs --
             # the None-safe, dataclass-driven rehydrator, loud per-row drops.
             # These rows ARE the adjacency the boundary rule consumes.
-            descents: list[MinConnection] = []
-            for desc_dict in _state_list(
-                state.min_connections_list, "min_connections_list"
-            ):
-                try:
-                    descents.append(min_connection_from_state_dict(desc_dict))
-                except (KeyError, ValueError, TypeError) as exc:
-                    print(
-                        "[sphere_viewer] basin topology: dropped descent "
-                        f"{desc_dict.get('saddle_id', '?')}"
-                        f"[{desc_dict.get('branch_index', '?')}]: {exc}"
-                    )
-
-            # Get basin centers
-            basin_centers_dicts = _state_list(
-                state.basin_centers_list, "basin_centers_list"
-            )
-            basin_centers = [
-                BasinCenter(
-                    center_id=str(bc.get("id", "")),
-                    polarity=str(bc.get("polarity", "maximum")),
-                    position=tuple(bc.get("position", (0.0, 0.0, 0.0))),  # type: ignore
-                    value=float(bc.get("value", 0.0)),
-                    is_effective=bool(bc.get("is_effective", False)),
-                    vertex_id=int(bc.get("vertex_id", -1)),
-                    origin_id=(str(bc["origin_id"]) if bc.get("origin_id") else None),
-                    net_index=int(bc.get("net_index", 1)),
-                    member_count=int(bc.get("member_count", 1)),
-                )
-                for bc in basin_centers_dicts
-            ]
+            descents = _rehydrate_descent_rows()
+            basin_centers = _basin_center_objects()
 
             # Compute basins: boundary = the ascent arcs at the saddles whose
             # descent drains into each minimum (basin v10 adjacency). No
@@ -4310,13 +4962,16 @@ def run_sphere_viewer(
             )
             state.minimum_basins = serialize_minimum_basins(state.minimum_basins_cache)
 
-        # Determine which arcs to draw based on toggle states
-        basin_arcs_to_draw: list[MaxConnection] = []
-
+        # Determine which basins to draw, project them to render rows, and let
+        # the shared group pass decide what is visible (basin v11). The minimum
+        # side used to funnel its ring geometry through _emit_max_arcs, the
+        # selection overlay's emitter, with a polarity parameter that only ever
+        # received "minimum"; it now owns a group, which is what makes the two
+        # polarities orderable against each other at all.
+        drawn_basins: list[MinimumBasin] = []
         if state.show_all_minimum_basins and state.minimum_basins_cache:
             # Draw all basin boundaries
-            for basin in state.minimum_basins_cache.values():
-                basin_arcs_to_draw.extend(get_basin_arcs(basin))
+            drawn_basins = list(state.minimum_basins_cache.values())
         elif (
             state.show_basin_for_selected_minimum
             and minimum_id
@@ -4324,10 +4979,21 @@ def run_sphere_viewer(
             and minimum_id in state.minimum_basins_cache
         ):
             # Draw only the selected minimum's boundary
-            basin_arcs_to_draw = get_basin_arcs(state.minimum_basins_cache[minimum_id])
+            drawn_basins = [state.minimum_basins_cache[minimum_id]]
 
-        # Render the basin arcs (or clear if no arcs)
-        _emit_max_arcs(basin_id=None, saddle_id=None, basin_arcs=basin_arcs_to_draw)
+        state.min_basin_arcs = _project_basin_arcs(
+            "minimum",
+            list(
+                serialize_minimum_basins(
+                    {b.minimum_id: b for b in drawn_basins}
+                ).values()
+            ),
+            _state_list(state.max_connections_list, "max_connections_list"),
+        )
+        _apply_basin_groups()
+        stats = state.basin_group_stats or {}
+        for warning in stats.get("minimum", {}).get("warnings", []):
+            print(f"[sphere_viewer] {warning}")
         render_window.Render()
         request_view_update()
 
@@ -5608,6 +6274,53 @@ def run_sphere_viewer(
                             hide_details=True,
                             classes="mb-1",
                         )
+                        # Maximum basin boundaries (basin v11): the same rule read
+                        # from the other end. A hill's ring is made of the VALLEY
+                        # floors that surround it, so a maximum is bounded exactly
+                        # as a minimum is -- by connectivity, and drawn in purple,
+                        # the colour of the centre it bounds.
+                        v3.VSwitch(
+                            label="Show Basin Boundary For Selected Maximum",
+                            v_model=("show_basin_for_selected_maximum",),
+                            density="compact",
+                            color="purple",
+                            hide_details=True,
+                            classes="mb-1",
+                        )
+                        v3.VSwitch(
+                            label="Show All Maximum Basin Boundaries",
+                            v_model=("show_all_maximum_basins",),
+                            density="compact",
+                            color="purple",
+                            hide_details=True,
+                            classes="mb-1",
+                        )
+                        # One summary per polarity, rendered from the SAME function
+                        # that gated the drawing, so the drawer can never
+                        # contradict the screen. A minimum's basin carries no ring
+                        # gate (v10 parity, gate = None); a maximum's is closed by
+                        # 0.5° rings -- the asymmetry is stated on the panel, not
+                        # hidden in a default. Each line is one preformatted
+                        # `summary` string plus the gate's warnings verbatim.
+                        for _basin in (
+                            ("minimum", "active_min_basins", "amber"),
+                            ("maximum", "active_max_basins", "purple"),
+                        ):
+                            _pol, _ids_key, _color = _basin
+                            with html.Div(
+                                v_if=f"len({_ids_key}) > 0",
+                                classes="mt-1 pa-2 rounded surface text-caption",
+                            ):
+                                html.Div(
+                                    basin_stats_template(_pol),
+                                    classes=f"text-{_color}-accent-text",
+                                )
+                                with html.Div(
+                                    v_for=f"w, i in basin_group_stats['{_pol}']['warnings']",
+                                    key="i",
+                                    classes="text-warning text-caption",
+                                ):
+                                    html.Div("{{ w }}")
 
                         with html.Div(v_if="show_max_saddle_arcs"):
                             with html.Div(classes="mt-2 pa-2 rounded surface"):

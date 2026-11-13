@@ -403,6 +403,40 @@ class TestClassifyBasinConnection:
         )
         assert pair["min_sep_text"] == "0.250°"
 
+    def test_every_return_path_carries_the_same_keys(self) -> None:
+        """The panel binds ``min_sep_text`` and ``gate_text`` unconditionally, so a
+        status that omits them renders those boxes blank -- in the ``no_basin``
+        return that is exactly the state where the reader most wants a number.
+
+        Pinned as a key-set CONTRACT over every status the classifier can return,
+        because the bug was invisible to any single-path assertion. The expected set
+        is the UNION over the statuses rather than a literal, so adding a statistic
+        stays green while a status that forgets one goes red.
+        """
+        cases: list[tuple[str, list[dict[str, Any]]]] = [
+            ("minimum", []),  # no_basin
+            ("minimum", [_ray("minimum")]),  # rays only
+            ("minimum", [_ray("minimum"), _ring("minimum")]),
+            ("maximum", [_ring("maximum"), _ring("maximum", sep=30.0)]),  # bounded
+            ("maximum", [_ray("maximum")]),  # unbounded hill
+            ("maximum", []),
+        ]
+        outs = [classify_basin_connection(p, r, MIN_BASIN_GATE_DEG) for p, r in cases]
+        statuses = {str(o["status"]) for o in outs}
+        assert statuses == {"no_basin", "bounded", "unbounded"}, statuses
+
+        union: set[str] = set()
+        for o in outs:
+            union |= set(o)
+        for (polarity, rows), o in zip(cases, outs):
+            assert set(o) == union, f"{polarity}/{rows} status={o['status']}"
+
+        # The two boxes the template binds, present and formatted on every path.
+        assert {"min_sep_text", "gate_text"} <= union
+        for o in outs:
+            assert isinstance(o["min_sep_text"], str) and o["min_sep_text"]
+            assert isinstance(o["gate_text"], str) and o["gate_text"]
+
 
 # ---------------------------------------------------------------------------
 # F. Toggle routing: four switches, one behaviour
@@ -427,6 +461,76 @@ class TestToggleRouting:
 
     def test_an_empty_batch_is_not_a_basin_change(self) -> None:
         assert not is_basin_only_change(set())
+
+    def test_the_toggle_handler_routes_basin_batches_to_the_funnel(self) -> None:
+        """The gate is only worth having if the handler honours it.
+
+        Four switches, one handler, one funnel: a basin-only batch must reach
+        ``_refresh_basin_overlays`` and return, skipping the rebuild. The v10
+        incident was every basin switch re-emitting the selection arcs over the
+        ring -- an infinite ring burst on a toggle.
+        """
+        calls = _calls_in("on_param_change")
+        assert "is_basin_only_change" in calls, sorted(calls)
+        assert "_refresh_basin_overlays" in calls, sorted(calls)
+
+    def test_the_funnel_refreshes_both_polarities_together(self) -> None:
+        """The funnel draws BOTH sides, unconditionally.
+
+        Each compute writes only its own group's render truth, and the occlusion
+        pass needs both groups present to order them: a one-sided refresh lets a
+        maximum's ring occlude a minimum basin that is not on screen. This is the
+        invariant a direct per-side call site breaks.
+        """
+        calls = _calls_in("_refresh_basin_overlays")
+        assert "compute_and_show_basin" in calls, sorted(calls)
+        assert "compute_and_show_max_basin" in calls, sorted(calls)
+
+    def test_the_funnel_does_not_rebuild(self) -> None:
+        """A basin toggle that rebuilds the scene is the v10 bug, in one line."""
+        calls = _calls_in("_refresh_basin_overlays")
+        assert "rebuild" not in " ".join(calls), sorted(calls)
+
+    def test_every_basin_draw_call_site_is_a_known_one(self) -> None:
+        """Guard rail on the fan-out that caused this class of bug.
+
+        The two compute-and-show functions are the only basin draws, and every place
+        that calls them is listed here by enclosing handler. A new caller must be
+        added deliberately -- and the point of listing them is that a call site which
+        draws ONE side conditionally (rather than funneling through
+        ``_refresh_basin_overlays``) half-refreshes the occlusion pair, which is the
+        one shape the funnel exists to prevent.
+
+        ``run_sphere_viewer`` is the startup pass, before any group exists, so it
+        calls the pair directly and that is fine.
+        """
+        tree = _tree()
+        draw_names = {"compute_and_show_basin", "compute_and_show_max_basin"}
+        sites: dict[str, set[str]] = {}
+        for fn in ast.walk(tree):
+            if not isinstance(fn, ast.FunctionDef):
+                continue
+            hit = {
+                n.func.id
+                for n in ast.walk(fn)
+                if isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Name)
+                and n.func.id in draw_names
+            }
+            if hit and fn.name not in draw_names:
+                sites[fn.name] = hit
+        assert set(sites) == {
+            "_refresh_basin_overlays",
+            "select_basin_center",
+            "run_sphere_viewer",
+        }, sites
+        # The funnel is the complete one; the direct site is the known exception.
+        assert sites["_refresh_basin_overlays"] == draw_names
+        body = _body_src("select_basin_center")
+        assert "_refresh_basin_overlays" not in body, (
+            "select_basin_center draws per side behind conditionals; it should call "
+            "the funnel so the occlusion pair is refreshed as a pair"
+        )
 
     def test_the_maximum_toggles_are_declared_on_state(self) -> None:
         """A switch with no state key is invisible: the v_model binds to nothing

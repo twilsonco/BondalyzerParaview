@@ -4045,3 +4045,66 @@ arcs and every ring passed through both saddles, and called it a k problem.
 
 Gate: 729 passed, mypy clean, ruff clean, LSP probe on the three edited sources
 shows only the pre-existing baseline advisories.
+
+## 2026-11-13 — A red gate that ran nothing: shipping the source half a committed test file imported
+
+Basin v11's record/replay half is now closed end to end. `99d1255` added the
+maximum-side dual in `basin_boundary.py` (`MaximumBasin`, `find_maximum_basins`,
+`serialize_maximum_basins`) and `1d33109` made it recordable and replayable:
+`PARAMS_SCHEMA_VERSION` 10 -> 11, `maximum_basins` in `PARAM_METRIC_KEYS` and in
+`_PARAMS_SCHEMA`, `stage_minimum_basins` computing both sides, and
+`check_minimum_basin_topology` returning a `(minimum_side, maximum_side)` tuple so
+one rule fires per polarity. The asymmetry worth remembering: a *maximum's* basin
+is bounded by its **descent** arcs and its adjacency comes from the **ascent**
+table, exactly inverted from the minimum side -- the ring around a hill is made of
+the streams that run off it, and the hill's neighbours are the saddles that climb
+into it. `connect_seed_to_minima` needs the same two tables, which is why the dual
+was ~40 lines and not a port.
+
+This commit is the viewer half, and the reason it exists is the more important
+record. `1d33109` committed a 658-line `tests/test_sphere_viewer_basin_groups.py`
+that imports nine names -- `MAX_BASIN_GATE_DEG`, `MIN_BASIN_GATE_DEG`,
+`MAX_BASIN_RING_COLOR`, `MIN_BASIN_RING_COLOR`, `RAYCAST_OCCLUDERS`,
+`basin_draw_order`, `basin_ring_color`, `classify_basin_connection`, `occludes` --
+which exist in **no commit**. They live only in the working tree, in the in-progress
+v11 viewer refactor. Consequence at `1d33109`: pytest dies during collection
+(`763 tests collected, 1 error`), the run aborts, and **zero tests execute**. Five
+further failures sat behind it in `test_sphere_viewer_params_load.py`, all fixed by
+the source being committed here.
+
+The lesson is about the gate, not the code: a suite that cannot collect does not
+fail loudly, it reports *nothing*, and `git commit` succeeded anyway. Two rules
+follow. (1) When a commit adds a test file, run that file in the commit's own tree
+before calling the gate green -- `git worktree add /tmp/bond-base HEAD` then the
+main venv's `python -m pytest` gives a clean read of HEAD without disturbing a
+shared working tree. (2) In a tree two agents are editing at once, `-S"def name"`
+on the imported symbol is a 5-second check that catches "test shipped, source did
+not".
+
+Rule (1) has a trap worth writing down, because it produced four phantom failures
+on first use: a fresh worktree has no **git-ignored** data, and this suite reads
+`*.plt` field files (`ethene3/4/5.plt`, `Pd5k/Pd20k.plt`,
+`ethene4_1d_zones.vtm` -- `*.plt` is `.gitignore:13`). Without them
+`test_sphere_viewer_params_load.py` raises `FileNotFoundError: PLT file not found:
+/private/tmp/bond-base/ethene4.plt` from `sphere_viewer.py:728` and reports 4
+failures / 7 skips on a commit that is actually green. Symlink the ignored data in
+first, then trust the number: 829 passed, 1 skipped at `f1d97c7`.
+
+Viewer changes here: the module-level basin logic the tests name (occlusion rule,
+draw order computed over the full set before anything draws, the classifier that
+feeds both the render gate and the warning text so the message cannot contradict the
+screen, `is_basin_only_change` routing all four basin switches to
+`_refresh_basin_overlays`), plus one fix that was mine -- the `no_basin` return of
+`classify_basin_connection` omitted `min_sep_text` and `gate_text`, which the panel
+template binds unconditionally, so the two boxes rendered blank in exactly the state
+where a reader wants a number. Pinned with a key-set contract computed as the UNION
+over every status, because a single-path assertion cannot see this class of bug.
+
+Known gap, deliberately not touched: `select_basin_center` (sphere_viewer.py:3993,
+3995) calls `compute_and_show_basin` / `compute_and_show_max_basin` per side behind
+conditionals, which is the one shape `_refresh_basin_overlays`'s own docstring
+forbids -- a one-sided refresh half-updates the occlusion pair. The new call-site
+guard lists it as a known site with a comment; the fix belongs to whoever owns the
+selection handlers.
+
+Gate: 829 passed, 1 skipped (HEAD before this commit: collection error, 0 executed).
