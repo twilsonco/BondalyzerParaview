@@ -4422,6 +4422,14 @@ def run_sphere_viewer(
         The write is a pure state read, so no pipeline recompute is needed.
         """
         try:
+            # Clear the Python-object caches before serialization. They hold
+            # MinimumBasin/MaximumBasin class instances that are not JSON-safe;
+            # the serialized versions (state.minimum_basins, state.maximum_basins)
+            # are what gets saved. The caches are computed on load, so they don't
+            # need to persist.
+            state.minimum_basins_cache = None
+            state.maximum_basins_cache = None
+            state.connection_graph = None
             payload = save_params_to_dict(
                 state,
                 plt_path=session.plt_path,
