@@ -502,7 +502,7 @@ def basin_stats_template(polarity: str) -> str:
     short = "min" if polarity == "minimum" else "max"
     label = "Minimum basins" if polarity == "minimum" else "Maximum basins"
     return (
-        f"{label}: {{{{ len(active_{short}_basins) }}}}"
+        f"{label}: {{{{ active_{short}_basins.length }}}}"
         f" | bound: {{{{ basin_group_stats['{polarity}']['status'] }}}}"
         f" | rings: {{{{ basin_group_stats['{polarity}']['n_rings'] }}}}"
         f" | rays: {{{{ basin_group_stats['{polarity}']['n_rays'] }}}}"
