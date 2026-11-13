@@ -6308,7 +6308,7 @@ def run_sphere_viewer(
                         ):
                             _pol, _ids_key, _color = _basin
                             with html.Div(
-                                v_if=f"len({_ids_key}) > 0",
+                                v_if=f"{_ids_key}.length > 0",
                                 classes="mt-1 pa-2 rounded surface text-caption",
                             ):
                                 html.Div(
