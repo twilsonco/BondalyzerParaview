@@ -6316,7 +6316,7 @@ def run_sphere_viewer(
                                     classes=f"text-{_color}-accent-text",
                                 )
                                 with html.Div(
-                                    v_for=f"w, i in basin_group_stats['{_pol}']['warnings']",
+                                    v_for=f"(w, i) in basin_group_stats['{_pol}']['warnings']",
                                     key="i",
                                     classes="text-warning text-caption",
                                 ):
