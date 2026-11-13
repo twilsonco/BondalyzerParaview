@@ -6,6 +6,7 @@ the connections from saddles that are spatially adjacent to the minimum.
 """
 
 from dataclasses import dataclass
+from typing import Any
 
 from gba_topology2.src.basin_center import BasinCenter
 from gba_topology2.src.max_connection import MaxConnection
@@ -15,6 +16,8 @@ __all__ = [
     "build_connection_graph",
     "find_minimum_basins",
     "get_basin_arcs",
+    "serialize_connection_graph",
+    "serialize_minimum_basins",
 ]
 
 
@@ -164,3 +167,79 @@ def get_basin_arcs(basin: MinimumBasin) -> list[MaxConnection]:
         List of MaxConnection objects in the basin, ordered for rendering.
     """
     return basin.boundary_arcs
+
+
+def serialize_connection_graph(
+    graph: dict[str, list[MaxConnection]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Convert a connection graph to a JSON-safe dict for parameter export.
+
+    ONE implementation, deliberately: the viewer writes this into the saved
+    params JSON and ``diagnose_params`` writes it into the results JSON, and a
+    graph is only inspectable across the two files if both sides serialize it
+    identically. The graph itself carries ONLY ``status="connected"`` and
+    ``verified=True`` arcs (``build_connection_graph``'s filter); the
+    ``status``/``verified`` fields are kept per row so the export is
+    self-describing and survives a future change to that filter.
+
+    Args:
+        graph: Output of :func:`build_connection_graph`, mapping each
+            saddle_id to its outgoing MaxConnection objects.
+
+    Returns:
+        Dict mapping saddle_id to a list of plain dicts with keys
+        ``max_id``, ``branch_index``, ``status``, ``verified``.
+    """
+    return {
+        saddle_id: [
+            {
+                "max_id": conn.max_id,
+                "branch_index": conn.branch_index,
+                "status": conn.status,
+                "verified": conn.verified,
+            }
+            for conn in conns
+        ]
+        for saddle_id, conns in graph.items()
+    }
+
+
+def serialize_minimum_basins(
+    basins: dict[str, MinimumBasin],
+) -> dict[str, dict[str, Any]]:
+    """Convert detected minimum basins to a JSON-safe dict for export.
+
+    Companion of :func:`serialize_connection_graph`; same single-implementation
+    rationale. Boundary saddle/maxima sets are emitted as SORTED lists so the
+    JSON is deterministic and diffs across runs compare cleanly.
+
+    Args:
+        basins: Output of :func:`find_minimum_basins`, mapping each
+            minimum_id to its MinimumBasin.
+
+    Returns:
+        Dict mapping minimum_id to a plain dict with keys ``minimum_id``,
+        ``n_boundary_arcs``, ``boundary_arcs`` (list of
+        ``{saddle_id, branch_index, max_id}`` in basin order),
+        ``boundary_saddles`` (sorted str list) and ``boundary_maxima``
+        (sorted str list, ``None`` endpoints dropped).
+    """
+    return {
+        min_id: {
+            "minimum_id": basin.minimum_id,
+            "n_boundary_arcs": len(basin.boundary_arcs),
+            "boundary_arcs": [
+                {
+                    "saddle_id": arc.saddle_id,
+                    "branch_index": arc.branch_index,
+                    "max_id": arc.max_id,
+                }
+                for arc in basin.boundary_arcs
+            ],
+            "boundary_saddles": sorted({arc.saddle_id for arc in basin.boundary_arcs}),
+            "boundary_maxima": sorted(
+                {arc.max_id for arc in basin.boundary_arcs if arc.max_id is not None}
+            ),
+        }
+        for min_id, basin in basins.items()
+    }

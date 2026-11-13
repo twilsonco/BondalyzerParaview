@@ -7,6 +7,8 @@ from gba_topology2.src.basin_boundary import (
     build_connection_graph,
     find_minimum_basins,
     get_basin_arcs,
+    serialize_connection_graph,
+    serialize_minimum_basins,
 )
 from gba_topology2.src.basin_center import BasinCenter
 from gba_topology2.src.max_connection import MaxConnection
@@ -255,3 +257,112 @@ class TestEdgeCases:
         conn = _make_connection("SAD_1", "MAX_1")
         result = find_minimum_basins([conn], [maximum])
         assert result == {}
+
+
+class TestSerializeConnectionGraph:
+    """Tests for serialize_connection_graph JSON-safe export."""
+
+    def test_empty_graph(self) -> None:
+        """Empty graph serializes to empty dict."""
+        assert serialize_connection_graph({}) == {}
+
+    def test_serializes_all_fields(self) -> None:
+        """Each saddle maps to dicts with max_id/branch_index/status/verified."""
+        # Built by hand: build_connection_graph filters stalled/unverified arcs
+        # out, so the serializer's row shape is checked on a graph that keeps
+        # them (the serializer itself must not filter).
+        graph = {
+            "SAD_1": [
+                _make_connection("SAD_1", "MAX_1"),
+                _make_connection(
+                    "SAD_1", "MAX_2", branch_index=1, status="stalled", verified=False
+                ),
+            ]
+        }
+        out = serialize_connection_graph(graph)
+        assert set(out) == {"SAD_1"}
+        rows = {r["max_id"]: r for r in out["SAD_1"]}
+        assert rows["MAX_1"] == {
+            "max_id": "MAX_1",
+            "branch_index": 0,
+            "status": "connected",
+            "verified": True,
+        }
+        assert rows["MAX_2"]["verified"] is False
+        assert rows["MAX_2"]["status"] == "stalled"
+
+    def test_json_round_trip(self) -> None:
+        """Output is JSON-serializable and round-trips."""
+        import json
+
+        graph = build_connection_graph([_make_connection("SAD_1", "MAX_1")])
+        out = serialize_connection_graph(graph)
+        assert json.loads(json.dumps(out)) == out
+
+    def test_graph_filters_unverified(self) -> None:
+        """build_connection_graph keeps only connected+verified arcs."""
+        graph = build_connection_graph(
+            [
+                _make_connection("SAD_1", "MAX_1"),
+                _make_connection("SAD_1", "MAX_2", status="stalled", verified=False),
+            ]
+        )
+        assert [c.max_id for c in graph["SAD_1"]] == ["MAX_1"]
+
+
+class TestSerializeMinimumBasins:
+    """Tests for serialize_minimum_basins JSON-safe export."""
+
+    def test_empty_basins(self) -> None:
+        """Empty basin dict serializes to empty dict."""
+        assert serialize_minimum_basins({}) == {}
+
+    def test_serializes_basin_fields(self) -> None:
+        """Basin emits counts, ordered arcs, and sorted boundary sets."""
+        basin = MinimumBasin(
+            minimum_id="MIN_1",
+            boundary_arcs=[
+                _make_connection("SAD_2", "MAX_B", branch_index=1),
+                _make_connection("SAD_1", "MAX_A"),
+                _make_connection("SAD_2", "MAX_A", branch_index=0),
+            ],
+        )
+        out = serialize_minimum_basins({"MIN_1": basin})
+        b = out["MIN_1"]
+        assert b["minimum_id"] == "MIN_1"
+        assert b["n_boundary_arcs"] == 3
+        # Order preserved from boundary_arcs.
+        assert [a["saddle_id"] for a in b["boundary_arcs"]] == [
+            "SAD_2",
+            "SAD_1",
+            "SAD_2",
+        ]
+        assert b["boundary_arcs"][0] == {
+            "saddle_id": "SAD_2",
+            "branch_index": 1,
+            "max_id": "MAX_B",
+        }
+        # Deduplicated, sorted, JSON-safe (no sets).
+        assert b["boundary_saddles"] == ["SAD_1", "SAD_2"]
+        assert b["boundary_maxima"] == ["MAX_A", "MAX_B"]
+
+    def test_stalled_arcs_drop_none_maxima(self) -> None:
+        """max_id=None endpoints appear in arcs but not in boundary_maxima."""
+
+        basin = MinimumBasin(
+            minimum_id="MIN_1",
+            boundary_arcs=[_make_connection("SAD_1", None, status="stalled")],
+        )
+        out = serialize_minimum_basins({"MIN_1": basin})
+        assert out["MIN_1"]["boundary_arcs"][0]["max_id"] is None
+        assert out["MIN_1"]["boundary_maxima"] == []
+
+    def test_json_round_trip(self) -> None:
+        """Output is JSON-serializable and round-trips."""
+        import json
+
+        basin = MinimumBasin(
+            minimum_id="MIN_1", boundary_arcs=[_make_connection("SAD_1", "MAX_1")]
+        )
+        out = serialize_minimum_basins({"MIN_1": basin})
+        assert json.loads(json.dumps(out)) == out
