@@ -209,6 +209,7 @@ from gba_topology2.src.ridge_refiner import (
 from gba_topology2.src.saddle_launch import LaunchBranch, SaddleLaunchSeed
 from gba_topology2.src.separatrix_tracer import (
     ExcisionRegion,
+    trace_downhill,
     trace_uphill,
 )
 from gba_topology2.src.sphere_frame import (
@@ -240,9 +241,11 @@ __all__ = [
     "DirectionMode",
     "DiscGeometry",
     "MaxConnection",
+    "MinConnection",
     "basin_centers_to_targets",
     "build_connection_pool",
     "connect_seed_to_maxima",
+    "connect_seed_to_minima",
     "connection_ray",
     "degenerate_arcs",
     "directional_support_radius",
@@ -269,6 +272,7 @@ _STATUS_OCCLUDED = "occluded"
 _STATUS_NO_TARGET = "no_target"
 
 _KIND_MAXIMUM = "maximum"
+_KIND_MINIMUM = "minimum"
 
 # How a connection's endpoints were found. GEODESIC is the great-circle ray of
 # Step 3; GRADIENT climbs the field, used when the ray reaches nothing.
@@ -749,6 +753,71 @@ class MaxConnection:
     total_turn_after_deg: float = 0.0
 
 
+@dataclass(frozen=True)
+class MinConnection:
+    """One descent branch and the minimum it runs into.
+
+    The descent mirror of :class:`MaxConnection` and the carrier of the basin
+    association (basin v10): a saddle's stable manifold drains into the minima
+    whose basins it bounds, so these records name exactly the adjacency the
+    boundary rule needs. The search is the ascent's, with arrival polarity
+    ``"minimum"`` (see :func:`connect_seed_to_minima`); the mutual flag and the
+    smoother stats of :class:`MaxConnection` are ascent-only and deliberately
+    absent.
+
+    Attributes:
+        saddle_id: Source saddle's id.
+        branch_index: Index of the branch among the seed's DESCENT branches.
+        min_id: Reached minimum's ``center_id``. Set only when ``status`` is
+            ``"connected"``.
+        status: ``"connected"`` / ``"occluded"`` / ``"no_target"`` — as in
+            :class:`MaxConnection`, with the arrival test on minima.
+        direction_mode: Which ray definition produced this verdict.
+        cross_track_deg: Perpendicular deviation of the hit from the ray.
+            None on every gradient record: a traced valley is not measured
+            against the ray.
+        along_track_deg: Arc-length along the ray at which the hit's excision
+            disc is first entered (the traced length for gradient records).
+        separation_deg: Great-circle angle saddle-to-hit.
+        arc_points: World-frame polyline of the connector: the geodesic
+            saddle-centre to minimum-centre for a ray hit, the BRIDGED traced
+            valley (saddle centre, port, path) for a gradient record.
+        saddle_value: Field value at the saddle.
+        min_value: Field value at the reached minimum.
+        verified: True when the source seed's ring converged on the fold order
+            the reduction reports.
+        blocker_id: Id of the critical point that occluded this branch.
+        blocker_polarity: Its polarity.
+        method: ``"geodesic"`` / ``"gradient"`` — as in :class:`MaxConnection`.
+        failure_gate: Which test rejected every minimum for an incomplete
+            descent; None when the geodesic succeeded.
+        stall_point: Highest... lowest point a failed descent reached.
+        transited_ids: Excision regions the fall crossed, in order.
+        completed_leg_deg: Length of the straight leg that closed the last gap
+            to the minimum (the TOTAL completion; see :class:`TraceOutcome`).
+    """
+
+    saddle_id: str
+    branch_index: int
+    min_id: str | None
+    status: str
+    direction_mode: str
+    cross_track_deg: float | None
+    along_track_deg: float | None
+    separation_deg: float | None
+    arc_points: tuple[tuple[float, float, float], ...]
+    saddle_value: float
+    min_value: float | None
+    verified: bool
+    blocker_id: str | None = None
+    blocker_polarity: str | None = None
+    method: str = _METHOD_GEODESIC
+    failure_gate: str | None = None
+    stall_point: tuple[float, float, float] | None = None
+    transited_ids: tuple[str, ...] = ()
+    completed_leg_deg: float | None = None
+
+
 def ray_frame(
     origin_unit: npt.NDArray[np.float64],
     direction_unit: npt.NDArray[np.float64],
@@ -1123,6 +1192,185 @@ def _arc_between(
     return tuple(out)
 
 
+def _prepare_targets(
+    targets: list[ConnectionTarget],
+    center: tuple[float, float, float] | None,
+) -> list[ConnectionTarget]:
+    """Map the pool into the centred unit frame and order it deterministically.
+
+    Shared by the ascent and the descent connector: both walk the SAME prepared
+    list, so the geometry the ray rule sees is identical in direction.
+
+    Args:
+        targets: The pool, in the frame the caller's positions are in.
+        center: World-frame nucleus (None = already centred).
+
+    Returns:
+        Targets with unit centred positions, degenerate entries dropped, sorted
+        by id so a tie in the metrics resolves the same way regardless of how
+        the caller assembled the list.
+    """
+    prepared: list[ConnectionTarget] = []
+    for t in targets:
+        pos = np.asarray(t.position, dtype=np.float64)
+        local = to_local(pos, center) if center is not None else pos
+        u = unit(local)
+        if u is None:
+            continue
+        # The principal axis is a DIRECTION, so it is translation invariant and
+        # needs no to_local. It is normalised here because radius_toward only
+        # tests it for zero-length and then projects it.
+        axis = np.asarray(t.principal_axis_unit, dtype=np.float64)
+        axis_unit = unit(axis)
+        prepared.append(
+            ConnectionTarget(
+                cp_id=str(t.cp_id),
+                polarity=t.polarity,
+                position=u,
+                value=t.value,
+                angular_radius_rad=float(t.angular_radius_rad),
+                semi_major_rad=float(t.semi_major_rad),
+                semi_minor_rad=float(t.semi_minor_rad),
+                principal_axis_unit=(
+                    axis_unit
+                    if axis_unit is not None
+                    else np.zeros(3, dtype=np.float64)
+                ),
+            )
+        )
+    prepared.sort(key=lambda t: t.cp_id)
+    return prepared
+
+
+@dataclass(frozen=True)
+class _BranchWalk:
+    """Result of walking one branch's ray outward over the prepared pool.
+
+    Attributes:
+        ray: The branch's ray; None when the seed is degenerate.
+        hit_idx: Pool index of the first capture/obstacle, -1 when the ray
+            reached nothing.
+        entry_rad: Along-track at which the ray meets the hit's basin.
+        cross: Signed cross-track of the hit at the moment it was taken.
+        occluder_idx: The hit index when the hit was an obstacle (occlusion);
+            -1 when it was a capture (connected).
+        gate: The test that rejected every arrival point when hit_idx is -1
+            (see :func:`_classify_gate`); None when the ray hit something.
+    """
+
+    ray: ConnectionRay | None
+    hit_idx: int
+    entry_rad: float
+    cross: float
+    occluder_idx: int
+    gate: str | None
+
+
+def _walk_branch(
+    saddle_id: str,
+    ray: ConnectionRay | None,
+    prepared: list[ConnectionTarget],
+    cone_rad: float,
+    max_arc_rad: float,
+    arrival_kind: str,
+) -> _BranchWalk:
+    """WALK THE RAY OUTWARD and stop at the first arrival or obstacle.
+
+    The single home of the search rule, shared verbatim by the ascent
+    (:func:`connect_seed_to_maxima`) and the descent
+    (:func:`connect_seed_to_minima`); only ``arrival_kind`` flips.
+
+    The rules, with their provenance (Entry 043/055, Pd_20K measurements):
+
+    - The disc test applies to OBSTACLES ONLY. A minimum or saddle blocks the
+      ray only if the great circle runs into its excision boundary: measured on
+      Pd_20K curvedness, MC18's branch 0 was blocked by MIN_19165 at cross
+      -7.41 with a 1.61 deg disc -- the ray sails past it, so it is not an
+      obstacle, and E-MAX_MC38 at cross -0.39 is the true hit.
+    - An ARRIVAL point is captured by the CONE, not by its disc. Requiring the
+      ray to hit the maximum's own boundary is tuned backwards: every raw
+      maximum's excision radius is one mesh pitch (1.61 deg on Pd_20K), while
+      the legitimate rays into a 3-saddle maximum arrive at cross-tracks 0.0,
+      1.35, 1.42 (MAX_7) and 0.0, 2.00, 1.98 (MAX_4) -- the gate sits inside
+      the measurement-noise band, so it accepted MAX_7's three connections and
+      rejected two of MAX_4's. The pattern is symmetric; only the gate's luck
+      is not. The cone is the directional criterion, and the disc is where the
+      arc STOPS.
+    - rho is the boundary radius TOWARD the ray, not the isotropic one: on
+      Pd_20K shape index the corridor MS13 (a=11.35, b=2.43) occluded a ray
+      passing 3.58 deg off its axis, because 3.58 < 11.35 while 3.58 > 2.78.
+      See :func:`directional_support_radius`.
+    - Candidates are ordered by (along, |cross|, idx). The Entry 043 rule
+      minimised |cross| with along as a tie-break, which scored aim without
+      checking reach: a ray through a near maximum toward a far one has cross
+      ~ 0 for BOTH, so cross-track cannot separate them and the tie-break was
+      float noise.
+    - A branch's own saddle is not a candidate: the ray starts there.
+
+    Args:
+        saddle_id: The source seed's id, excluded from the candidates.
+        ray: The branch's great-circle ray (None = degenerate seed).
+        prepared: The pool, centred unit positions, sorted by id.
+        cone_rad: Forward-sector half-angle, radians.
+        max_arc_rad: Arc-length cap, radians.
+        arrival_kind: Polarity the capture test fires on -- ``"maximum"`` for
+            the ascent, ``"minimum"`` for the descent.
+
+    Returns:
+        The :class:`_BranchWalk`; ``gate`` is set exactly when ``hit_idx`` is
+        -1 and a ray existed.
+    """
+    if ray is None:
+        return _BranchWalk(
+            ray=None, hit_idx=-1, entry_rad=0.0, cross=0.0, occluder_idx=-1, gate=None
+        )
+
+    candidates: list[tuple[float, float, int]] = []
+    for idx, t in enumerate(prepared):
+        if t.cp_id == saddle_id:
+            continue
+        along, cross = target_frame_angles(t.position, ray)
+        if along <= 0.0 or along > max_arc_rad:
+            continue
+        if abs(cross) > cone_rad:
+            continue
+        candidates.append((along, cross, idx))
+    candidates.sort(key=lambda r: (r[0], abs(r[1]), r[2]))
+
+    hit_idx = -1
+    entry_rad = 0.0
+    cross = 0.0
+    occluder_idx = -1
+    for along, cross_c, idx in candidates:
+        t = prepared[idx]
+        rho = t.radius_toward(ray.direction_unit)
+        if t.polarity == arrival_kind:
+            # Captured by the CONE. The boundary entry is recorded as the
+            # ranking key (along_track_deg) and as where the ray meets the
+            # basin, but it is NOT a vertex of the drawn connector.
+            boundary = disc_entry_angle(along, cross_c, rho)
+            hit_idx = idx
+            entry_rad = boundary if boundary is not None and boundary > 0.0 else along
+            cross = cross_c
+            break
+        obstacle = disc_entry_angle(along, cross_c, rho)
+        if obstacle is not None and obstacle > 0.0:
+            hit_idx, entry_rad, cross, occluder_idx = (
+                idx,
+                obstacle,
+                cross_c,
+                idx,
+            )
+            break
+
+    gate = (
+        _classify_gate(prepared, ray, cone_rad, max_arc_rad, arrival_kind)
+        if hit_idx < 0
+        else None
+    )
+    return _BranchWalk(ray, hit_idx, entry_rad, cross, occluder_idx, gate)
+
+
 def connect_seed_to_maxima(
     seeds: list[SaddleLaunchSeed],
     targets: list[ConnectionTarget],
@@ -1195,37 +1443,7 @@ def connect_seed_to_maxima(
     max_arc_rad = math.radians(max_arc_deg)
     cone_rad = cone_pitch * delta_theta_mesh_rad
 
-    prepared: list[ConnectionTarget] = []
-    for t in targets:
-        pos = np.asarray(t.position, dtype=np.float64)
-        local = to_local(pos, center) if center is not None else pos
-        u = unit(local)
-        if u is None:
-            continue
-        # The principal axis is a DIRECTION, so it is translation invariant and
-        # needs no to_local. It is normalised here because radius_toward only
-        # tests it for zero-length and then projects it.
-        axis = np.asarray(t.principal_axis_unit, dtype=np.float64)
-        axis_unit = unit(axis)
-        prepared.append(
-            ConnectionTarget(
-                cp_id=str(t.cp_id),
-                polarity=t.polarity,
-                position=u,
-                value=t.value,
-                angular_radius_rad=float(t.angular_radius_rad),
-                semi_major_rad=float(t.semi_major_rad),
-                semi_minor_rad=float(t.semi_minor_rad),
-                principal_axis_unit=(
-                    axis_unit
-                    if axis_unit is not None
-                    else np.zeros(3, dtype=np.float64)
-                ),
-            )
-        )
-    # Order the candidate list by id so a tie in the metrics resolves the same
-    # way regardless of how the caller assembled the list.
-    prepared.sort(key=lambda t: t.cp_id)
+    prepared = _prepare_targets(targets, center)
 
     out: list[MaxConnection] = []
     for seed in seeds:
@@ -1233,100 +1451,26 @@ def connect_seed_to_maxima(
         centre_unit = unit(centre)
         for branch in seed.ascent_branches:
             ray = connection_ray(seed, branch, direction_mode, sphere_radius)
-            if ray is None or centre_unit is None:
+            walk = _walk_branch(
+                seed.saddle_id, ray, prepared, cone_rad, max_arc_rad, _KIND_MAXIMUM
+            )
+            if walk.ray is None or centre_unit is None:
                 # connection_ray returns None exactly when the centre is at the
                 # nucleus, so the second test is the type narrowing for the
                 # connector below; both are the same degenerate seed.
                 out.append(_no_target(seed, branch, direction_mode))
                 continue
 
-            # WALK THE RAY OUTWARD, in increasing along-track, and stop at the
-            # first critical point that is either a maximum (a target) or a disc
-            # the ray actually enters (an obstacle).
-            #
-            # The disc test applies to OBSTACLES ONLY. A minimum or saddle blocks
-            # the ray only if the great circle runs into its excision boundary:
-            # measured on Pd_20K curvedness, MC18's branch 0 was blocked by
-            # MIN_19165 at cross -7.41 with a 1.61 deg disc -- the ray sails past
-            # it, so it is not an obstacle, and E-MAX_MC38 at cross -0.39 is the
-            # true hit.
-            #
-            # A MAXIMUM is captured by the CONE, not by its disc. Requiring the
-            # ray to hit the maximum's own boundary is tuned backwards: every raw
-            # maximum's excision radius is one mesh pitch (1.61 deg on Pd_20K),
-            # while the legitimate rays into a 3-saddle maximum arrive at
-            # cross-tracks 0.0, 1.35, 1.42 (MAX_7) and 0.0, 2.00, 1.98 (MAX_4) --
-            # the gate sits inside the measurement-noise band, so it accepted
-            # MAX_7's three connections and rejected two of MAX_4's. The pattern
-            # is symmetric; only the gate's luck is not. The cone is the
-            # directional criterion, and the disc is where the arc STOPS.
-            #
-            # rho is the boundary radius TOWARD the ray, not the isotropic one.
-            # An excision boundary around an elongated set is an ellipse, and
-            # using its semi-major as a disc inflates the transverse reach by the
-            # aspect ratio: on Pd_20K shape index the corridor MS13 (a=11.35,
-            # b=2.43) occluded a ray passing 3.58 deg off its axis, because
-            # 3.58 < 11.35 while 3.58 > 2.78. See directional_support_radius.
-            #
-            # The Entry 043 rule minimised |cross| with along as a tie-break,
-            # which scored aim without checking reach: a ray through a near
-            # maximum toward a far one has cross ~ 0 for BOTH, so cross-track
-            # cannot separate them and the tie-break was float noise.
-            candidates: list[tuple[float, float, int]] = []
-            for idx, t in enumerate(prepared):
-                # A branch's own saddle is not a candidate: the ray starts there.
-                if t.cp_id == seed.saddle_id:
-                    continue
-                along, cross = target_frame_angles(t.position, ray)
-                if along <= 0.0 or along > max_arc_rad:
-                    continue
-                if abs(cross) > cone_rad:
-                    continue
-                candidates.append((along, cross, idx))
-            candidates.sort(key=lambda r: (r[0], abs(r[1]), r[2]))
-
-            hit_idx = -1
-            entry_rad = 0.0
-            cross = 0.0
-            occluder_idx = -1
-            for along, cross_c, idx in candidates:
-                t = prepared[idx]
-                if t.polarity == _KIND_MAXIMUM:
-                    # Captured by the CONE. The boundary entry is recorded as the
-                    # ranking key (along_track_deg) and as where the ray meets the
-                    # basin, but it is NOT a vertex of the drawn connector: the
-                    # search's job is to find the two endpoints, and the connector
-                    # is the single geodesic between them.
-                    rho = t.radius_toward(ray.direction_unit)
-                    boundary = disc_entry_angle(along, cross_c, rho)
-                    hit_idx = idx
-                    entry_rad = (
-                        boundary if boundary is not None and boundary > 0.0 else along
-                    )
-                    cross = cross_c
-                    break
-                rho = t.radius_toward(ray.direction_unit)
-                obstacle = disc_entry_angle(along, cross_c, rho)
-                if obstacle is not None and obstacle > 0.0:
-                    hit_idx, entry_rad, cross, occluder_idx = (
-                        idx,
-                        obstacle,
-                        cross_c,
-                        idx,
-                    )
-                    break
-
-            if hit_idx < 0:
-                # The ray reached nothing. Say WHICH test rejected the maxima,
-                # then climb the field from the port. The gate label is what makes
-                # the two-stage design auditable: it separates "the ridge curves"
-                # (cone/behind) from "the ridge is long" (cap) from "there is no
-                # maximum anywhere ahead" (empty).
-                gate = _classify_gate(prepared, ray, cone_rad, max_arc_rad)
+            if walk.hit_idx < 0:
+                # The ray reached nothing; the gate names WHICH test rejected
+                # the maxima. Climb the field from the port. The gate label is
+                # what makes the two-stage design auditable: it separates "the
+                # ridge curves" (cone/behind) from "the ridge is long" (cap)
+                # from "there is no maximum anywhere ahead" (empty).
                 traced = _gradient_connection(
                     seed=seed,
                     branch=branch,
-                    gate=gate,
+                    gate=walk.gate or GATE_EMPTY,
                     direction_mode=direction_mode,
                     prepared=prepared,
                     mesh_pts=mesh_pts,
@@ -1342,8 +1486,8 @@ def connect_seed_to_maxima(
                 out.append(traced)
                 continue
 
-            hit = prepared[hit_idx]
-            connected = occluder_idx < 0
+            hit = prepared[walk.hit_idx]
+            connected = walk.occluder_idx < 0
             out.append(
                 MaxConnection(
                     saddle_id=seed.saddle_id,
@@ -1351,8 +1495,8 @@ def connect_seed_to_maxima(
                     max_id=hit.cp_id if connected else None,
                     status=_STATUS_CONNECTED if connected else _STATUS_OCCLUDED,
                     direction_mode=direction_mode,
-                    cross_track_deg=math.degrees(cross),
-                    along_track_deg=math.degrees(entry_rad),
+                    cross_track_deg=math.degrees(walk.cross),
+                    along_track_deg=math.degrees(walk.entry_rad),
                     separation_deg=math.degrees(
                         angular_distance(centre_unit, hit.position)
                     ),
@@ -1390,13 +1534,155 @@ def connect_seed_to_maxima(
     return mark_mutual(out)
 
 
+def connect_seed_to_minima(
+    seeds: list[SaddleLaunchSeed],
+    targets: list[ConnectionTarget],
+    sphere_radius: float,
+    delta_theta_mesh_rad: float,
+    center: tuple[float, float, float] | None = None,
+    max_arc_deg: float = MAX_ARC_DEG,
+    cone_pitch: float = CONE_PITCH,
+    direction_mode: DirectionMode = "port_tangent",
+    mesh_pts: npt.NDArray[np.float64] | None = None,
+    f_vals: npt.NDArray[np.float64] | None = None,
+    find_k_nearest: KNearestFinder | None = None,
+    excision_regions: Sequence[ExcisionRegion] = (),
+    capture_pitch: float | None = None,
+) -> list[MinConnection]:
+    """Find the first minimum each DESCENT branch runs into.
+
+    The descent twin of :func:`connect_seed_to_maxima`, built on the SAME walk
+    (:func:`_walk_branch` with arrival polarity ``"minimum"``) and the same
+    fallback ladder: the port's great circle is walked outward, cone capture
+    for minima, directional-disc occlusion for everything else; an unresolved
+    branch falls down the field (:func:`separatrix_tracer.trace_downhill`, the
+    ascent of the negated field, with the integrator, the stall rule, the
+    TOTAL completion and the transit record all inherited verbatim).
+
+    These records ARE the basin association (basin v10): the boundary of a
+    minimum's basin is the set of saddle->max arcs at the saddles whose descent
+    lands in it. A saddle's stable manifold drains into the minima it bounds --
+    that is the statement; proximity never was.
+
+    Args:
+        seeds: Saddle launch seeds, in the centred atom frame; the
+            ``descent_branches`` of each are walked. Verified and provisional
+            sets are usually passed together, as for the ascent.
+        targets: EVERY visible critical point -- minima are the arrivals, the
+            maxima and saddles are the obstacles. Build with
+            :func:`build_connection_pool`.
+        sphere_radius: Atom sphere radius R.
+        delta_theta_mesh_rad: Intrinsic angular mesh pitch.
+        center: World-frame nucleus (the pool's frame; arcs are emitted in it).
+        max_arc_deg: Arc-length cap in DEGREES for the geodesic stage.
+        cone_pitch: Forward-sector half-angle in mesh-pitch units.
+        direction_mode: ``"port_tangent"`` / ``"chord"`` -- as in the ascent.
+        mesh_pts: (N, 3) mesh vertices, centred frame; with ``f_vals`` enables
+            the gradient-fall fallback.
+        f_vals: (N,) condensed field values on ``mesh_pts``.
+        find_k_nearest: Spatial index for the descent's IDW samples.
+        excision_regions: Noisy discs the fall may cross but must not end
+            inside (see :func:`connect_seed_to_maxima`).
+        capture_pitch: Completion reach in mesh pitches (None = TOTAL).
+
+    Returns:
+        One :class:`MinConnection` per (seed, descent branch), in input order.
+        Deterministic: the winner depends only on the candidate SET, never on
+        its order. No mutual flag: reciprocation is a maximum-side statement
+        (a minimum claims every inflowing saddle; there is no tightest).
+    """
+    if direction_mode not in DIRECTION_MODES:
+        raise ValueError(
+            f"direction_mode {direction_mode!r} must be one of {DIRECTION_MODES}"
+        )
+    max_arc_rad = math.radians(max_arc_deg)
+    cone_rad = cone_pitch * delta_theta_mesh_rad
+
+    prepared = _prepare_targets(targets, center)
+
+    out: list[MinConnection] = []
+    for seed in seeds:
+        centre = np.asarray(seed.saddle_position, dtype=np.float64)
+        centre_unit = unit(centre)
+        for branch in seed.descent_branches:
+            ray = connection_ray(seed, branch, direction_mode, sphere_radius)
+            walk = _walk_branch(
+                seed.saddle_id, ray, prepared, cone_rad, max_arc_rad, _KIND_MINIMUM
+            )
+            if walk.ray is None or centre_unit is None:
+                out.append(_min_no_target(seed, branch, direction_mode))
+                continue
+
+            if walk.hit_idx < 0:
+                out.append(
+                    _gradient_descent_connection(
+                        seed=seed,
+                        branch=branch,
+                        gate=walk.gate or GATE_EMPTY,
+                        direction_mode=direction_mode,
+                        prepared=prepared,
+                        mesh_pts=mesh_pts,
+                        f_vals=f_vals,
+                        sphere_radius=sphere_radius,
+                        delta_theta_mesh_rad=delta_theta_mesh_rad,
+                        center=center,
+                        find_k_nearest=find_k_nearest,
+                        centre_unit=centre_unit,
+                        excision_regions=excision_regions,
+                        capture_pitch=capture_pitch,
+                    )
+                )
+                continue
+
+            hit = prepared[walk.hit_idx]
+            connected = walk.occluder_idx < 0
+            out.append(
+                MinConnection(
+                    saddle_id=seed.saddle_id,
+                    branch_index=branch.sector_index,
+                    min_id=hit.cp_id if connected else None,
+                    status=_STATUS_CONNECTED if connected else _STATUS_OCCLUDED,
+                    direction_mode=direction_mode,
+                    cross_track_deg=math.degrees(walk.cross),
+                    along_track_deg=math.degrees(walk.entry_rad),
+                    separation_deg=math.degrees(
+                        angular_distance(centre_unit, hit.position)
+                    ),
+                    # The final connector is the geodesic between the two
+                    # cluster centres, exactly as on the ascent: the ray found
+                    # the endpoints, the connector is the straight line between
+                    # them, port bearing breaking the antipodal tie.
+                    arc_points=_arc_between(
+                        centre_unit,
+                        hit.position,
+                        sphere_radius,
+                        center,
+                        bearing_unit=unit(
+                            np.asarray(branch.launch_position, dtype=np.float64)
+                        ),
+                        band_rad=ANTIPODAL_BAND_RING_MULTIPLE * seed.ring_radius_rad,
+                    ),
+                    saddle_value=float(seed.saddle_value),
+                    min_value=float(hit.value) if connected else None,
+                    verified=bool(seed.index_agrees),
+                    blocker_id=None if connected else hit.cp_id,
+                    blocker_polarity=None if connected else hit.polarity,
+                    method=_METHOD_GEODESIC,
+                    failure_gate=None if connected else GATE_OCCLUDED,
+                )
+            )
+
+    return out
+
+
 def _classify_gate(
     prepared: list[ConnectionTarget],
     ray: ConnectionRay,
     cone_rad: float,
     max_arc_rad: float,
+    arrival_kind: str = _KIND_MAXIMUM,
 ) -> str:
-    """Name the test that kept the ray from reaching a maximum.
+    """Name the test that kept the ray from reaching an arrival point.
 
     Every pool maximum is scored against the ray directly -- the pre-filtered
     candidate list cannot be used, because the maxima it excludes are exactly the
@@ -1410,18 +1696,24 @@ def _classify_gate(
         ray: The branch's great-circle ray.
         cone_rad: Forward-sector half-angle, radians.
         max_arc_rad: Arc-length cap, radians.
+        arrival_kind: Polarity of the arrival test -- ``"maximum"`` for the
+            ascent, ``"minimum"`` for the descent. Every pool entry of this
+            polarity is scored against the ray directly; the pre-filtered
+            candidate list cannot be used, because the entries it excludes are
+            exactly the ones being diagnosed.
 
     Returns:
-        The most informative gate: ``behind`` beats ``cone`` beats ``cap`` beats
-        ``empty``, because a maximum that lies behind the launch direction is the
-        strongest statement of "the straight connector cannot work here".
+        The most informative gate: ``behind`` beats ``cone`` beats ``cap``
+        beats ``empty``, because an arrival point that lies behind the launch
+        direction is the strongest statement of "the straight connector cannot
+        work here".
     """
-    maxima = [t for t in prepared if t.polarity == _KIND_MAXIMUM]
-    if not maxima:
+    arrivals = [t for t in prepared if t.polarity == arrival_kind]
+    if not arrivals:
         return GATE_EMPTY
 
     behind = cone_miss = cap_miss = 0
-    for t in maxima:
+    for t in arrivals:
         along, cross = target_frame_angles(t.position, ray)
         if along <= 0.0:
             behind += 1
@@ -1436,9 +1728,10 @@ def _classify_gate(
         return GATE_CONE
     if cap_miss:
         return GATE_CAP
-    # A maximum sat inside the sector and the walk still ended: the only way that
-    # happens is that every one of them was screened by the disc-entry test, which
-    # for a target is not a rejection, so this is the empty-sector case.
+    # An arrival point sat inside the sector and the walk still ended: the only
+    # way that happens is that every one of them was screened by the disc-entry
+    # test, which for a target is not a rejection, so this is the empty-sector
+    # case.
     return GATE_EMPTY
 
 
@@ -1610,6 +1903,160 @@ def _no_target(
         max_value=None,
         verified=bool(seed.index_agrees),
         failure_gate=gate,
+    )
+
+
+def _min_no_target(
+    seed: SaddleLaunchSeed,
+    branch: LaunchBranch,
+    direction_mode: str,
+    gate: str | None = None,
+) -> MinConnection:
+    """Build the record for a descent branch that claimed nothing.
+
+    Mirror of :func:`_no_target` for the descent side.
+
+    Args:
+        seed: The source saddle.
+        branch: The unclaimed descent branch.
+        direction_mode: The ray definition in force.
+        gate: Which geodesic test rejected every minimum, from
+            :func:`_classify_gate`.
+
+    Returns:
+        A :class:`MinConnection` with ``status == "no_target"`` and no arc.
+    """
+    return MinConnection(
+        saddle_id=seed.saddle_id,
+        branch_index=branch.sector_index,
+        min_id=None,
+        status=_STATUS_NO_TARGET,
+        direction_mode=direction_mode,
+        cross_track_deg=None,
+        along_track_deg=None,
+        separation_deg=None,
+        arc_points=(),
+        saddle_value=float(seed.saddle_value),
+        min_value=None,
+        verified=bool(seed.index_agrees),
+        failure_gate=gate,
+    )
+
+
+def _gradient_descent_connection(
+    seed: SaddleLaunchSeed,
+    branch: LaunchBranch,
+    gate: str,
+    direction_mode: DirectionMode,
+    prepared: list[ConnectionTarget],
+    mesh_pts: npt.NDArray[np.float64] | None,
+    f_vals: npt.NDArray[np.float64] | None,
+    sphere_radius: float,
+    delta_theta_mesh_rad: float,
+    center: tuple[float, float, float] | None,
+    find_k_nearest: KNearestFinder | None,
+    centre_unit: npt.NDArray[np.float64],
+    excision_regions: Sequence[ExcisionRegion] = (),
+    capture_pitch: float | None = None,
+) -> MinConnection:
+    """Fall down the field from the port to finish an incomplete descent branch.
+
+    Mirror of :func:`_gradient_connection` on the ascent of the negated field:
+    :func:`separatrix_tracer.trace_downhill` inherits the integrator, the stall
+    rule, the TOTAL completion and the transit record verbatim, so the descent
+    keeps the ascent's inviolable property -- a gradient path is never left
+    uncommitted. The record shape is the ascent's too: an arrival becomes a
+    connected record carrying the traced valley; anything else keeps the path,
+    the endpoint and the gate, so the disagreement with the topology is drawn
+    and attributable, not inferred from an empty cell.
+
+    Args:
+        seed: The source saddle.
+        branch: The unresolved descent branch.
+        gate: Why the geodesic ray failed, from :func:`_classify_gate`.
+        direction_mode: The ray definition, carried onto the record.
+        prepared: The pool, centred unit positions (the fall's own frame).
+        mesh_pts: Mesh vertices, centred frame, or None to disable the fallback.
+        f_vals: Field values, or None to disable the fallback.
+        sphere_radius: Atom sphere radius R.
+        delta_theta_mesh_rad: Mesh pitch, to read the step and budget.
+        center: World-frame nucleus.
+        find_k_nearest: Spatial index for the fall's IDW samples.
+        centre_unit: Unit radial of the saddle, for ``separation_deg``.
+        excision_regions: Noisy discs the fall may cross but must not end inside.
+        capture_pitch: Completion reach in mesh pitches (None = TOTAL).
+
+    Returns:
+        A connected record when the descent arrives, otherwise ``"no_target"``
+        carrying the gate and the traced path it fell.
+    """
+    base = _min_no_target(seed, branch, direction_mode, gate=gate)
+    if mesh_pts is None or f_vals is None:
+        return base
+
+    outcome = trace_downhill(
+        start_position=branch.launch_position,
+        targets=prepared,
+        mesh_pts=mesh_pts,
+        f_vals=f_vals,
+        sphere_radius=sphere_radius,
+        delta_theta_mesh_rad=delta_theta_mesh_rad,
+        center=center,
+        find_k_nearest=find_k_nearest,
+        excision_regions=excision_regions,
+        capture_pitch=capture_pitch,
+    )
+
+    # Prepend saddle-to-port bridge to the traced path for visibility: the
+    # gradient vanishes at the saddle itself, so the fall starts at the port.
+    port_unit = unit(np.asarray(branch.launch_position, dtype=np.float64))
+    if port_unit is not None:
+        bridge = _saddle_to_port_arc(
+            saddle_unit=centre_unit,
+            port_unit=port_unit,
+            sphere_radius=sphere_radius,
+            center=center,
+        )
+        full_path = bridge + outcome.path[1:] if outcome.path else bridge
+    else:
+        full_path = outcome.path
+
+    if outcome.status != "arrived" or outcome.max_id is None:
+        return replace(
+            base,
+            arc_points=full_path,
+            stall_point=outcome.path[-1] if outcome.path else None,
+            along_track_deg=outcome.arc_length_deg,
+            transited_ids=outcome.transited_ids,
+            # A traced valley draws in the gradient colour even unresolved:
+            # method names how the geometry was produced, status what it found.
+            method=_METHOD_GRADIENT,
+        )
+
+    hit = next((t for t in prepared if t.cp_id == outcome.max_id), None)
+    if hit is None:  # pragma: no cover - the tracer only returns pool ids
+        return base
+    return MinConnection(
+        saddle_id=seed.saddle_id,
+        branch_index=branch.sector_index,
+        min_id=hit.cp_id,
+        status=_STATUS_CONNECTED,
+        direction_mode=direction_mode,
+        cross_track_deg=None,
+        along_track_deg=outcome.arc_length_deg,
+        separation_deg=math.degrees(angular_distance(centre_unit, hit.position)),
+        # The traced valley IS the connector here. Flattening it to the geodesic
+        # between its endpoints would erase the wrapping that made the ray rule
+        # fail, which is the finding. The bridge shows the full path from the
+        # saddle centre through the port.
+        arc_points=full_path,
+        saddle_value=float(seed.saddle_value),
+        min_value=float(hit.value),
+        verified=bool(seed.index_agrees),
+        method=_METHOD_GRADIENT,
+        failure_gate=gate,
+        transited_ids=outcome.transited_ids,
+        completed_leg_deg=outcome.completed_leg_deg,
     )
 
 

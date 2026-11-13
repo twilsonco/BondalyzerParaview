@@ -3941,3 +3941,69 @@ type as base.
 Replay test is the user's screen as a test: the four saved ethene3 rows
 (arc polylines trimmed, endpoints kept) + four CP rows → 4 arcs → 2-saddle
 graph → 3 basins × 4 boundary arcs around MAX_4864.
+
+## 2026-11-13 — The descent connector: basins named by where they drain (basin v10, Units A+B)
+
+Commit range: 92bcf9a (`trace_downhill`) + this commit (descent connector).
+Files: `src/separatrix_tracer.py` (`trace_downhill`),
+`src/max_connection.py` (`_prepare_targets`, `_BranchWalk`, `_walk_branch`,
+`_classify_gate` arrival_kind, `MinConnection`, `connect_seed_to_minima`,
+`_min_no_target`, `_gradient_descent_connection`),
+`tests/test_separatrix_tracer.py` (+12), `tests/test_max_connection.py` (+9).
+
+**Why.** The v9 basin boundary used K-NEAREST PROXIMITY to associate minima
+with saddles, and it saturated: on ethene3 every basin claimed the same 3
+arcs of 3 (2 minima, 2 saddles: k=2x3=6>3), every ring passed through both
+saddles, and a real structure was reported as "K too small; raise to 4-8".
+It was not a parameter. A minimum's basin is bounded by the stable manifolds
+of saddles whose DESCENT runs into that minimum — connectivity, not
+proximity. The association the rule needs is measured off the field itself,
+and the instrument already existed: the ascent connector (journal 2026-11-12
+entries) walks a saddle's ASCENT branches by great-circle ray with cone
+capture on maxima, directional-disc occlusion on everything else, and a
+gradient climb as fallback. The descent is its mirror image with the arrival
+polarity inverted.
+
+**Unit A — `trace_downhill` (separatrix_tracer).** A THIN wrapper: negate the
+field (`f_grad = -g`), relabel the minima in the pool as maxima
+(`replace(t, polarity="maximum", value=-t.value)`), and call `trace_uphill`
+verbatim. The integrator, the stall rule, the TOTAL completion and the
+transit record are inherited, not forked — a bug fixed in the ascent is fixed
+in the descent the same second. Parity is pinned by a test: on a pool of
+relabelled minima, `trace_downhill(g) == trace_uphill(-g)` field for field
+(`stall_point` is the raw-field endpoint, so it negates between the two).
+Negated-peak well: descends onto the pole from 36.9 deg out in 64 steps;
+flat plateau: no-op stall; negated ridge: descends to the flanks.
+
+**Unit B — the descent connector (max_connection).** The ray stage of
+`connect_seed_to_maxima` was extracted, verbatim, into
+`_prepare_targets` / `_walk_branch(seed_id, ray, prepared, cone_rad,
+max_arc_rad, arrival_kind)`; `_classify_gate` took the same `arrival_kind`
+parameter (arrivals are scored directly off the pool; the pre-filtered
+candidate list cannot be used because the entries it EXCLUDES are exactly the
+ones being diagnosed). `connect_seed_to_minima` is the same loop over
+`seed.descent_branches` with `arrival_kind="minimum"`, emitting
+`MinConnection` records — the ascent fields minus `mutual` and the smoother
+stats (reciprocation is a maximum-side statement: a minimum claims every
+inflowing saddle, there is no tightest), plus `min_id`/`min_value`. Unresolved
+branches fall via `_gradient_descent_connection`, bridged saddle-centre to
+port exactly like the ascent: a gradient path is never left uncommitted.
+
+**Semantics pinned by tests.** Cone capture on minima; the nearest wins and
+pool order cannot matter; a maximum ON the meridian occludes like any
+non-arrival whose disc the ray enters, while one OFF the cone leaves the gate
+`empty` (the pool has no minima — not "cone"), which is the polarity
+inversion stated as a gate; a well behind the port gives the geodesic rule
+`behind` and the fall arrives (method `gradient`, gate kept, value at the
+minimum is the RAW field value); omitting `mesh_pts`/`f_vals` leaves the
+pure-geodesic contract untouched (the Pd_20K no-op). 73 tests in the file;
+the 65 ascent tests pass unmodified across the extraction — the refactor is
+behavior-preserving by construction.
+
+**Next (Unit C).** params_schema/diagnose_params: the basin_bounded_by rule
+becomes graph-adjacency ("the boundary of minimum M's basin is the
+saddle->max arcs at the saddles whose descent branches reach M", from
+`_minimum_basins` + `connect_seed_to_minima`), replacing the proximity tier
+and its k advice. The k-nearest list itself stays — it remains the right
+answer for the "closest maxima" question; the error was ever feeding it to a
+boundary rule.

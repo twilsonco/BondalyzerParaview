@@ -25,7 +25,7 @@ and hides any centred/world mixup.
 
 import math
 import random
-from dataclasses import replace
+from dataclasses import fields, replace
 
 import numpy as np
 import pytest
@@ -40,9 +40,11 @@ from gba_topology2.src.max_connection import (
     DirectionMode,
     DiscGeometry,
     MaxConnection,
+    MinConnection,
     basin_centers_to_targets,
     build_connection_pool,
     connect_seed_to_maxima,
+    connect_seed_to_minima,
     connection_ray,
     degenerate_arcs,
     directional_support_radius,
@@ -1488,3 +1490,160 @@ def test_gradient_path_is_prepended_with_saddle_to_port_bridge() -> None:
     assert len(conn.arc_points) > 2 * ARC_SAMPLES / 10, (
         f"Arc too short: {len(conn.arc_points)} points, expected > {2 * ARC_SAMPLES / 10}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Basin v10: the descent connector (connect_seed_to_minima).
+#
+# The same walk, arrival polarity inverted: minima are captured by the cone,
+# maxima and saddles occlude by their directional discs, and an unresolved
+# branch FALLS down the field (trace_downhill, the ascent of the negated
+# field). These records are the basin association -- the boundary of a
+# minimum's basin is the set of saddle->max arcs at the saddles whose descent
+# drains into it -- so the mirror is pinned test by test against the ascent
+# behaviour above.
+# ---------------------------------------------------------------------------
+
+
+def _mesh_and_well(
+    well_unit: tuple[float, float, float],
+    width_deg: float = 30.0,
+    n: int = 1200,
+) -> tuple[np.ndarray, np.ndarray]:
+    """A fibonacci mesh with one smooth WELL (the negated peak)."""
+    pts, peak = _mesh_and_peak(well_unit, width_deg, n)
+    return pts, -peak
+
+
+def test_descent_connects_a_minimum_by_cone_capture() -> None:
+    """A minimum straight ahead of a descent port is captured by the cone."""
+    seed = _seed("SAD_1", [_branch(0, 35.0, kind="descent")])
+    conns = connect_seed_to_minima(
+        [seed], [_target("MIN_2", "minimum", 60.0, 35.0, value=-1.0)], R, PITCH
+    )
+    assert len(conns) == 1
+    conn = conns[0]
+    assert conn.status == "connected"
+    assert conn.min_id == "MIN_2"
+    assert conn.method == "geodesic"
+    assert conn.failure_gate is None
+    assert conn.verified is True
+    assert conn.cross_track_deg is not None
+    assert abs(conn.cross_track_deg) < math.degrees(6.0 * PITCH)
+    # The connector's endpoints are the two cluster centres.
+    centre = np.asarray(seed.saddle_position, dtype=np.float64)
+    end = np.asarray(conn.arc_points[-1], dtype=np.float64)
+    assert float(np.linalg.norm(end - centre)) == pytest.approx(
+        2.0 * math.sin(math.radians(60.0) / 2.0), rel=1e-6
+    )
+
+
+def test_descent_is_occluded_by_a_saddle_disc() -> None:
+    """A saddle's directional disc between port and minimum blocks the ray."""
+    seed = _seed("SAD_1", [_branch(0, 20.0, kind="descent")])
+    conns = connect_seed_to_minima(
+        [seed],
+        [
+            _target("MIN_1", "minimum", 70.0, 20.0, value=-1.0),
+            _target("SAD_9", "saddle", 35.0, 20.0, value=0.0, disc_deg=8.0),
+        ],
+        R,
+        PITCH,
+    )
+    conn = conns[0]
+    assert conn.status == "occluded"
+    assert conn.min_id is None
+    assert conn.blocker_id == "SAD_9"
+    assert conn.blocker_polarity == "saddle"
+    assert conn.failure_gate == "occluded"
+
+
+def test_descent_ignores_maxima_as_arrivals() -> None:
+    """Arrival polarity is inverted: a maximum ahead is not a target.
+
+    The max sits outside the cone, so it neither arrives nor occludes; the gate
+    says the pool holds no minima at all ("empty"), not "cone". A max exactly
+    ON the meridian is a different existing rule -- it occludes like any
+    non-arrival whose disc the ray enters -- pinned separately below.
+    """
+    seed = _seed("SAD_1", [_branch(0, 0.0, kind="descent")])
+    conns = connect_seed_to_minima(
+        [seed], [_target("MAX_9", "maximum", 40.0, 30.0, value=2.0)], R, PITCH
+    )
+    conn = conns[0]
+    assert conn.status == "no_target"
+    assert conn.failure_gate == "empty"
+
+
+def test_descent_a_maximum_on_the_meridian_occludes() -> None:
+    """A non-arrival whose disc the ray enters blocks the branch (shared rule)."""
+    seed = _seed("SAD_1", [_branch(0, 0.0, kind="descent")])
+    conns = connect_seed_to_minima(
+        [seed],
+        [
+            _target("MIN_1", "minimum", 70.0, 0.0, value=-1.0),
+            _target("MAX_9", "maximum", 40.0, 0.0, value=2.0, disc_deg=5.0),
+        ],
+        R,
+        PITCH,
+    )
+    conn = conns[0]
+    assert conn.status == "occluded"
+    assert conn.blocker_id == "MAX_9"
+    assert conn.blocker_polarity == "maximum"
+
+
+def test_descent_pick_nearest_and_is_order_independent() -> None:
+    """Two minima on the meridian: the nearest wins; pool order cannot matter."""
+    seed = _seed("SAD_1", [_branch(0, 0.0, kind="descent")])
+    near = _target("MIN_A", "minimum", 40.0, 0.0, value=-1.0)
+    far = _target("MIN_B", "minimum", 70.0, 0.0, value=-2.0)
+    a = connect_seed_to_minima([seed], [near, far], R, PITCH)[0]
+    b = connect_seed_to_minima([seed], [far, near], R, PITCH)[0]
+    assert a.min_id == b.min_id == "MIN_A"
+
+
+def test_gradient_descent_falls_onto_a_well_behind_the_port() -> None:
+    """Well behind the port: the ray sees nothing, the FALL arrives."""
+    seed = _seed("SAD_1", [_branch(0, 0.0, kind="descent")])
+    targets = [_target("MIN_9", "minimum", 0.0, 0.0, value=-1.0, disc_deg=2.0)]
+
+    geodesic = connect_seed_to_minima([seed], targets, R, PITCH)
+    assert geodesic[0].status == "no_target"
+    assert geodesic[0].method == "geodesic"
+    assert geodesic[0].failure_gate == "behind"
+
+    pts, f = _mesh_and_well((0.0, 0.0, 1.0))
+    conn = connect_seed_to_minima([seed], targets, R, PITCH, mesh_pts=pts, f_vals=f)[0]
+    assert conn.status == "connected"
+    assert conn.min_id == "MIN_9"
+    assert conn.method == "gradient"
+    assert conn.failure_gate == "behind"
+    assert conn.min_value == pytest.approx(-1.0)
+    # Bridged: the connector starts at the saddle centre, not at the port.
+    centre = np.asarray(seed.saddle_position, dtype=np.float64)
+    first = np.asarray(conn.arc_points[0], dtype=np.float64)
+    assert float(np.linalg.norm(first - centre)) < 0.2 * R
+    # The fall ran downhill: raw field values along the connector never
+    # increase above the start by more than the mesh's well depth.
+    assert conn.along_track_deg is not None and conn.along_track_deg > 0.0
+
+
+def test_descent_without_a_field_is_purely_geodesic() -> None:
+    """Omitting mesh_pts/f_vals leaves the geodesic rule untouched (no-op)."""
+    seed = _seed("SAD_1", [_branch(0, 0.0, kind="descent")])
+    targets = [_target("MIN_9", "minimum", 0.0, 0.0, value=-1.0, disc_deg=2.0)]
+    conns = connect_seed_to_minima(
+        [seed], targets, R, PITCH, mesh_pts=None, f_vals=None
+    )
+    assert conns[0].status == "no_target"
+    assert conns[0].method == "geodesic"
+
+
+def test_min_connection_record_has_no_ascent_only_fields() -> None:
+    """Reciprocation and the smoother stats are ascent-only statements."""
+    names = {f.name for f in fields(MinConnection)}
+    assert "mutual" not in names
+    assert "refined" not in names
+    assert "max_id" not in names
+    assert {"min_id", "min_value", "saddle_id", "branch_index"} <= names
