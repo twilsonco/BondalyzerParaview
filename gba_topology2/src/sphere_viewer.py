@@ -18,6 +18,7 @@ import json
 import math
 import os
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -379,6 +380,34 @@ def _state_str(value: object, name: str) -> str:
     if value is None:
         return ""
     return value if isinstance(value, str) else str(value)
+
+
+# Basin-overlay toggles: switches that re-draw the arc actor from the connections
+# ALREADY computed, so they are view-only and must not rebuild the pipeline.
+BASIN_ONLY_TOGGLES: frozenset[str] = frozenset(
+    {"show_basin_for_selected_minimum", "show_all_minimum_basins"}
+)
+
+
+def is_basin_only_change(changed: Iterable[str]) -> bool:
+    """Decide whether a state-change batch is basin-overlay-only.
+
+    The basin toggles are pure overlay: :func:`compute_and_show_basin` re-renders
+    the arc actor from the existing ``max_connections_list``. Running the full
+    pipeline (``update_field`` -> ``update_topology``) for such a toggle clears
+    ``minimum_basins_cache`` and re-emits the selected maximum's arcs over the
+    basin ring — the visualization appears, then a rebuild erases it. The observer
+    uses this predicate to skip the rebuild when a batch contains ONLY basin
+    toggles; any pipeline-affecting control in the batch forces the rebuild.
+
+    Args:
+        changed: The set/list of state keys that changed in this batch.
+
+    Returns:
+        ``True`` when the batch is non-empty and every key is a basin toggle.
+    """
+    keys = set(changed)
+    return bool(keys) and keys <= BASIN_ONLY_TOGGLES
 
 
 def _parse_aux_radius(aux: dict[str, Any]) -> float | None:
@@ -3790,13 +3819,20 @@ def run_sphere_viewer(
     def on_param_change(**kwargs: Any) -> None:
         if suppress_param_change:
             return
-        # Check if basin toggles changed; if so, update basin visualization
-        if (
-            "show_basin_for_selected_minimum" in kwargs
-            or "show_all_minimum_basins" in kwargs
-        ):
+        # Basin toggles are a pure overlay: they re-render the arc actor from the
+        # connections already computed, so they must NOT trigger a pipeline
+        # rebuild. update_field() -> update_topology() reruns the whole Morse
+        # pipeline, clears minimum_basins_cache, and ends by calling
+        # select_basin_center -> _emit_max_arcs(basin_id=...), which overwrites
+        # the basin ring with the selected maximum's arcs. That overwrite is
+        # exactly "basins appear, then vanish a moment later": compute_and_show_basin
+        # draws, then update_field erases. Basin-only batches draw and return;
+        # every rebuild re-applies the overlay on top of the fresh arcs.
+        if is_basin_only_change(kwargs):
             compute_and_show_basin(state.selected_minimum_id)
+            return
         update_field()
+        compute_and_show_basin(state.selected_minimum_id)
 
     @ctrl.add("reset_defaults")
     def reset_defaults() -> None:

@@ -26,7 +26,11 @@ import pathlib
 from typing import Final
 
 from gba_topology2.src.params_schema import DEFAULT_UI_STATE
-from gba_topology2.src.sphere_viewer import PARAM_CONTEXT_STRING_KEYS
+from gba_topology2.src.sphere_viewer import (
+    BASIN_ONLY_TOGGLES,
+    PARAM_CONTEXT_STRING_KEYS,
+    is_basin_only_change,
+)
 
 SOURCE: Final[pathlib.Path] = (
     pathlib.Path(__file__).resolve().parent.parent
@@ -147,3 +151,54 @@ class TestParamTriggerRegistry:
         keys, _handler = _state_change_keys()
         for name in ("refine_ridge_paths", "coarse_ridge_curves", "probe_ridge_points"):
             assert name in keys, f"{name} is not a recompute trigger"
+
+
+class TestBasinOnlyChangePredicate:
+    """Basin overlay toggles draw without a pipeline rebuild.
+
+    Regression for the "boundaries flash, then vanish" symptom: the basin
+    toggles ran compute_and_show_basin (draw) and then update_field (rebuild),
+    and the rebuild's final select_basin_center re-emitted the selection arcs
+    over the basin ring. The observer now early-returns for basin-only batches,
+    so the draw is the LAST write to the arc actor.
+    """
+
+    def test_each_basin_toggle_alone_is_basin_only(self) -> None:
+        for key in BASIN_ONLY_TOGGLES:
+            assert is_basin_only_change({key}), key
+
+    def test_both_toggles_together_is_basin_only(self) -> None:
+        assert is_basin_only_change(set(BASIN_ONLY_TOGGLES))
+
+    def test_mixed_batch_rebuilds(self) -> None:
+        """A batch that also changes a pipeline control must not skip the
+        rebuild — the non-basin control in the same flush is real work."""
+        assert not is_basin_only_change({"show_all_minimum_basins", "k_pitch"})
+
+    def test_empty_batch_is_not_basin_only(self) -> None:
+        """An empty change set is not a basin change (no draw, no rebuild)."""
+        assert not is_basin_only_change(set())
+
+    def test_toggles_are_registered_as_triggers(self) -> None:
+        """The predicate's keys must be the real subscribed control names."""
+        keys, _handler = _state_change_keys()
+        assert set(BASIN_ONLY_TOGGLES) <= set(keys)
+
+    def test_observer_uses_the_predicate(self) -> None:
+        """on_param_change must branch on the predicate, not re-derive it.
+
+        Guards the wiring: the ast shape of the handler's basin branch is
+        ``if is_basin_only_change(...)`` — an inline set comparison drifting
+        from BASIN_ONLY_TOGGLES is exactly how this bug class ships twice.
+        """
+        tree = ast.parse(SOURCE.read_text(encoding="utf-8"), filename=str(SOURCE))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "on_param_change":
+                calls = [
+                    c.func.id
+                    for c in ast.walk(node)
+                    if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+                ]
+                assert "is_basin_only_change" in calls
+                return
+        raise AssertionError("on_param_change not found in sphere_viewer.py")
