@@ -4007,3 +4007,41 @@ saddle->max arcs at the saddles whose descent branches reach M", from
 and its k advice. The k-nearest list itself stays — it remains the right
 answer for the "closest maxima" question; the error was ever feeding it to a
 boundary rule.
+
+## 2026-11-13 basin v10: boundaries from descent connectivity (Units C-E)
+
+The consolidation landed. `find_minimum_basins` now takes the descent table
+(`connect_seed_to_minima` output, Unit B) and bounds a minimum's basin by the
+saddle->max arcs at the saddles whose descent branches DRAIN into it. The v9
+rule -- k=3 spatially nearest saddles by Euclidean distance -- is deleted with
+`_spatial_distance` and every trace of the k advice; there is no proximity
+fallback, because proximity is exactly what the rule replaced.
+
+The viewer computes the descent connector on every arc rebuild, on the RAW
+pre-refine table (refine is an ascent-side concept; the drain says where water
+goes), from the same pool, regions and field as the ascent. `state.min_connections_list`
+(rows from `min_connection_to_state_dict`, arc geometry included -- the v9
+lesson: a saved observation must carry everything the render reads) and
+`state.descent_connection_stats` join `derived_metrics` as schema **v10**; v9 is
+admitted legacy, and a v9 file's replay honestly reports its basins as
+un-derivable-by-v10 rather than reconstructing them from the rejected rule.
+The basin pipeline rehydrates the rows through the generalized
+`connection_from_state_dict(d, MinConnection)` -- dataclass-driven, None-safe,
+loud per-row drops (the 4606cac pattern; the descent rows carry the same
+Optional-nulls that emptied v9's arc table).
+
+`diagnose_params` gained the adjacency in `stage_connections` and rewrote
+`stage_minimum_basins`: per-minimum ring counts, `n_descent_{connected,
+occluded,no_target}`, `rings_covering_every_arc` (normal when the adjacency
+supports it -- two saddles that drain everywhere SHOULD share every arc), and
+`minima_without_basins` naming the failure gates of the unresolved drains.
+The saturation signature the v9 panel answered with "raise k to 4-8" is now a
+measurement, not an accusation.
+
+The ethene3 replay states the shape of the fix: with a consistent 2+2-edge
+descent topology the rings are 4/2/2 arcs -- E-MIN_MC3 bounded by both saddles,
+each bare minimum by the one that drains into it. v9 gave every basin all 4
+arcs and every ring passed through both saddles, and called it a k problem.
+
+Gate: 729 passed, mypy clean, ruff clean, LSP probe on the three edited sources
+shows only the pre-existing baseline advisories.

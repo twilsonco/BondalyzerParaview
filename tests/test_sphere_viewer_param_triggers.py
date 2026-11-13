@@ -96,6 +96,30 @@ def _calls_recompute(handler_name: str) -> bool:
 class TestParamTriggerRegistry:
     """The subscription list covers every control the viewer exposes."""
 
+    def test_basin_pipeline_is_fed_the_descent_table(self) -> None:
+        """basin v10: the viewer must call find_minimum_basins(conn, centers, descents).
+
+        The v9 two-argument call rebuilt every ring from spatial proximity --
+        the rule that saturated. The third argument is the adjacency, so the
+        short call is a behavior regression, not a style choice; it is pinned
+        structurally on the source because the pipeline itself lives in a
+        closure the AST harness can read and pytest cannot invoke.
+        """
+        tree = ast.parse(SOURCE.read_text(encoding="utf-8"), filename=str(SOURCE))
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "find_minimum_basins"
+        ]
+        assert calls, "the viewer no longer calls find_minimum_basins"
+        for call in calls:
+            assert len(call.args) == 3, (
+                f"find_minimum_basins at line {call.lineno} takes "
+                f"{len(call.args)} args; basin v10 requires the descent table"
+            )
+
     def test_every_control_is_a_recompute_trigger(self) -> None:
         """A control that changes the analysis must fire the handler.
 

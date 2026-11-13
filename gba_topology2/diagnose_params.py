@@ -92,8 +92,10 @@ from gba_topology2.src.max_connection import (
     ConnectionTarget,
     DiscGeometry,
     MaxConnection,
+    MinConnection,
     build_connection_pool,
     connect_seed_to_maxima,
+    connect_seed_to_minima,
     disc_geometry_from_cluster,
     refine_connections,
     summarize_connections,
@@ -236,6 +238,9 @@ class RunContext:
     #: ``runtime_traced_connections``: the probe measures the ASCENT, so it must
     #: read this table and not the smoothed one drawn beside it.
     traced_connections: list[MaxConnection] = field(default_factory=list)
+    # basin v10: the descent drain table, computed from the same pool, regions
+    # and field as the ascent -- the adjacency stage_minimum_basins consumes.
+    descent_connections: list[MinConnection] = field(default_factory=list)
     #: Per-connection output of the Step 3 ridge switches, for ``--out``.
     connection_details: list[dict[str, Any]] = field(default_factory=list)
     #: Ridge-probe counters under the viewer's ``state.ridge_probe_stats`` names.
@@ -954,6 +959,20 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
         excision_regions=regions,
     )
     ctx.traced_connections = list(ctx.connections)
+    # basin v10: the DESCENT connector, the basin adjacency, on the RAW table
+    # (refine is an ascent-side concept). The same port, the same walk with the
+    # arrival polarity on minima, the same field fallback as the viewer runs.
+    ctx.descent_connections = connect_seed_to_minima(
+        seeds=[*ctx.seeds, *ctx.unverified_seeds],
+        targets=pool,
+        sphere_radius=ctx.sphere_radius,
+        delta_theta_mesh_rad=ctx.delta_theta_rad,
+        center=ctx.center,
+        mesh_pts=ctx.pts,
+        f_vals=ctx.f_vals,
+        find_k_nearest=ctx.locator,
+        excision_regions=regions,
+    )
     # The same controls the viewer's switches drive, read the same way every other
     # viewer control is read here: a snapshot saved with either ON must reproduce the
     # line that was on screen, not the raw ascent. Both off is a no-op --
@@ -981,12 +1000,16 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
 def stage_minimum_basins(ctx: RunContext) -> dict[str, Any]:
     """Compute minimum basin boundaries from the connection topology.
 
-    Uses the verified connections to detect cycles that enclose each minimum CP.
-    Each basin boundary is an ordered cycle of arcs (MaxConnection objects) that
-    forms a closed path enclosing a minimum in the connection graph.
+    basin v10: a minimum's basin is bounded by the saddle->maximum arcs at the
+    saddles whose DESCENT branches drain into it (ctx.descent_connections --
+    the adjacency off the field). The v9 rule (k=3 spatially nearest saddles)
+    saturated on few-saddle systems and its "raise k" advice was noise; both
+    are gone.
 
     Returns:
-        Summary of the basin detection, including count of detected basins.
+        Summary of the basin detection: count, per-basin rings, the descent
+        table's resolution statistics, and for every minimum without a basin,
+        the gates of the descent branches that failed to reach it.
     """
     if not ctx.connections:
         ctx.minimum_basins = {}
@@ -999,6 +1022,7 @@ def stage_minimum_basins(ctx: RunContext) -> dict[str, Any]:
         ctx.minimum_basins = find_minimum_basins(
             ctx.connections,
             ctx.basin_centers,
+            ctx.descent_connections,
         )
     except (ValueError, Exception) as e:
         # Topology error or malformed data; use empty dict
@@ -1030,6 +1054,50 @@ def stage_minimum_basins(ctx: RunContext) -> dict[str, Any]:
         summary["n_saddle_to_max_arcs"] = sum(
             len(conns) for conns in ctx.connection_graph.values()
         )
+
+    # basin v10 diagnostics: the descent table's resolution, and the advice the
+    # v9 panel owed the operator (it said "raise k"; k was never the problem).
+    total_arcs = sum(len(v) for v in ctx.connection_graph.values())
+    n_drains = sum(1 for d in ctx.descent_connections if d.status == "connected")
+    summary["n_descent_branches"] = len(ctx.descent_connections)
+    summary["n_descent_connected"] = n_drains
+    summary["n_descent_occluded"] = sum(
+        1 for d in ctx.descent_connections if d.status == "occluded"
+    )
+    summary["n_descent_no_target"] = sum(
+        1 for d in ctx.descent_connections if d.status == "no_target"
+    )
+    # A ring carrying EVERY arc is not automatically saturation -- with two
+    # saddles that both drain everywhere it is the truth. It is only
+    # reportable as the v9 artifact when the descent table does NOT support
+    # the adjacency; that comparison is the diagnostic, not k.
+    summary["rings_covering_every_arc"] = [
+        basin.minimum_id
+        for basin in ctx.minimum_basins.values()
+        if total_arcs > 0 and len(basin.boundary_arcs) == total_arcs
+    ]
+    minima_ids = [bc.center_id for bc in ctx.basin_centers if bc.polarity == "minimum"]
+    summary["minima_without_basins"] = [
+        {
+            "minimum_id": mid,
+            # Which gates kept the descent branches from resolving; the
+            # attribution the v9 panel could not make. "cone" = the ridge
+            # curves (the geodesic ray misses; the fall answers), "cap" = the
+            # ridge is long, "empty" = no minimum in the pool ahead, "occluded"
+            # = a visible disc sits on the drain.
+            "failure_gates": sorted(
+                {
+                    str(d.failure_gate)
+                    for d in ctx.descent_connections
+                    if d.failure_gate is not None
+                    and (d.blocker_id is None or d.blocker_polarity != "minimum")
+                }
+            )
+            or ["no descent branch drained into this minimum"],
+        }
+        for mid in minima_ids
+        if mid not in ctx.minimum_basins
+    ]
     return summary
 
 

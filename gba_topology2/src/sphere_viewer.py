@@ -80,6 +80,8 @@ from gba_topology2.src.basin_boundary import (
     connection_from_state_dict,
     find_minimum_basins,
     get_basin_arcs,
+    min_connection_from_state_dict,
+    min_connection_to_state_dict,
     serialize_connection_graph,
     serialize_minimum_basins,
 )
@@ -114,8 +116,10 @@ from gba_topology2.src.harmonic_nudge import (
 from gba_topology2.src.max_connection import (
     DiscGeometry,
     MaxConnection,
+    MinConnection,
     build_connection_pool,
     connect_seed_to_maxima,
+    connect_seed_to_minima,
     disc_geometry_from_cluster,
     refine_connections,
     summarize_connections,
@@ -2206,6 +2210,11 @@ def run_sphere_viewer(
     state.launch_stats = summarize_outcomes([])
     state.connection_stats = summarize_connections([])
     state.max_connections_list = []
+    # basin v10: the descent table (the basin adjacency) and its summary, the
+    # export's min_connections_list / descent_connection_stats metrics. Rows are
+    # JSON-safe dicts written on every rebuild, mirroring max_connections_list.
+    state.min_connections_list = []
+    state.descent_connection_stats = {}
     state.max_arcs_list = []
     # The ridge probe's summary for the drawer AND for the saved snapshot. It is
     # display-only in the sense that nothing downstream reads it, so it is absent
@@ -3090,6 +3099,41 @@ def run_sphere_viewer(
             # into ground the reduction already declared noisy.
             excision_regions=connection_regions,
         )
+        # basin v10: the DESCENT connector, the basin adjacency. The same port,
+        # the same walk with the arrival polarity on minima, the same field
+        # fallback -- and it is the record that replaces v9's "3 spatially
+        # nearest saddles" rule, which saturated. Computed on the RAW table:
+        # refine is an ascent-side concept, the drain says where water goes.
+        runtime_min_connections = connect_seed_to_minima(
+            seeds=[*seeds, *unverified_seeds],
+            targets=connection_pool,
+            sphere_radius=session.sphere_radius,
+            delta_theta_mesh_rad=dtheta,
+            center=session.center,
+            mesh_pts=session.pts_np,
+            f_vals=f_vals_np,
+            find_k_nearest=session.locator,
+            # The VISIBLE boundaries, the same source the pool and the ascent use.
+            excision_regions=connection_regions,
+        )
+        state.min_connections_list = [
+            min_connection_to_state_dict(d) for d in runtime_min_connections
+        ]
+        state.descent_connection_stats = {
+            "n_branches": len(runtime_min_connections),
+            "n_connected": sum(
+                1 for d in runtime_min_connections if d.status == "connected"
+            ),
+            "n_occluded": sum(
+                1 for d in runtime_min_connections if d.status == "occluded"
+            ),
+            "n_no_target": sum(
+                1 for d in runtime_min_connections if d.status == "no_target"
+            ),
+            "n_gradient": sum(
+                1 for d in runtime_min_connections if d.method == "gradient"
+            ),
+        }
         # Step 6: the sawtooth-smoothing post-pass. A gradient-traced connector is
         # an ASCENT, not the ridge: in flat ground it chatters across the crest with
         # teeth one mesh pitch long. The smoother replaces each chatter run with one
@@ -4211,6 +4255,22 @@ def run_sphere_viewer(
                         f"[{conn_dict.get('branch_index', '?')}]: {exc}"
                     )
 
+            # basin v10: the descent table, rehydrated exactly like the arcs --
+            # the None-safe, dataclass-driven rehydrator, loud per-row drops.
+            # These rows ARE the adjacency the boundary rule consumes.
+            descents: list[MinConnection] = []
+            for desc_dict in _state_list(
+                state.min_connections_list, "min_connections_list"
+            ):
+                try:
+                    descents.append(min_connection_from_state_dict(desc_dict))
+                except (KeyError, ValueError, TypeError) as exc:
+                    print(
+                        "[sphere_viewer] basin topology: dropped descent "
+                        f"{desc_dict.get('saddle_id', '?')}"
+                        f"[{desc_dict.get('branch_index', '?')}]: {exc}"
+                    )
+
             # Get basin centers
             basin_centers_dicts = _state_list(
                 state.basin_centers_list, "basin_centers_list"
@@ -4230,10 +4290,14 @@ def run_sphere_viewer(
                 for bc in basin_centers_dicts
             ]
 
-            # Compute basins
+            # Compute basins: boundary = the ascent arcs at the saddles whose
+            # descent drains into each minimum (basin v10 adjacency). No
+            # descent table -- a v9-era file -- means no adjacency is known and
+            # no rings; that is the rule's honest behavior, not a regression,
+            # and the metrics above say which case the screen is in.
             try:
                 state.minimum_basins_cache = find_minimum_basins(
-                    conn_objs, basin_centers
+                    conn_objs, basin_centers, descents
                 )
             except (ValueError, Exception):
                 # Topology error or malformed data; use empty dict

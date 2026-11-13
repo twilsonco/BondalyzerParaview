@@ -109,6 +109,9 @@ def _make_state(**overrides: Any) -> _FakeState:
     values["basin_centers_list"] = []
     values["connection_graph"] = {}
     values["minimum_basins"] = {}
+    # v10: the descent drain table (basin adjacency) and its summary.
+    values["min_connections_list"] = []
+    values["descent_connection_stats"] = {}
     values["selected_cp"] = {"id_label": "SAD_42", "is_effective": False}
     values["selected_cluster"] = {"id": "MC3"}
     values["selected_catastrophe"] = None
@@ -604,3 +607,74 @@ def test_a_v8_file_loads_without_the_basin_sections() -> None:
     assert params["show_all_minimum_basins"] is True
     assert "minimum_basins" not in params["derived_metrics"]
     assert "selected_minimum_id" not in params["selection"]
+
+
+#: One descent row in the exact shape min_connection_to_state_dict writes --
+#: the basin v10 adjacency as it crosses the file boundary, nulls included
+#: (min_id None means "drained nowhere", a stored value, not corruption).
+DESCENT_ROW: dict[str, Any] = {
+    "saddle_id": "SAD_1",
+    "branch_index": 0,
+    "min_id": "MIN_1",
+    "status": "connected",
+    "direction_mode": "port_tangent",
+    "cross_track_deg": 0.0,
+    "along_track_deg": 25.0,
+    "separation_deg": 30.0,
+    "arc_points": [[0.0, 0.0, 1.0], [0.6, 0.0, 0.8]],
+    "saddle_value": 0.5,
+    "min_value": 0.0003,
+    "verified": True,
+    "blocker_id": None,
+    "blocker_polarity": None,
+    "method": "geodesic",
+    "failure_gate": None,
+    "stall_point": None,
+    "transited_ids": [],
+    "completed_leg_deg": None,
+}
+
+
+def test_v10_export_carries_the_descent_table() -> None:
+    """basin v10: the drain table is the adjacency; the file must carry it.
+
+    A v9 file recorded the arcs and rebuilt the ring from proximity -- the rule
+    that saturated. The rows cross the boundary verbatim here; their field-for-
+    field rehydration is pinned in test_basin_boundary.py (the v9 None-safety
+    bug class included).
+    """
+    stats = {
+        "n_branches": 2,
+        "n_connected": 1,
+        "n_occluded": 1,
+        "n_no_target": 0,
+        "n_gradient": 0,
+    }
+    payload = _export(
+        min_connections_list=[DESCENT_ROW], descent_connection_stats=stats
+    )
+
+    metrics = payload["derived_metrics"]
+    assert metrics["min_connections_list"] == [DESCENT_ROW]
+    assert metrics["descent_connection_stats"] == stats
+    assert payload["schema_version"] == 10
+    loaded = load_params_from_dict(json.loads(json.dumps(payload)))
+    assert loaded["derived_metrics"]["min_connections_list"] == [DESCENT_ROW]
+
+
+def test_a_v9_file_loads_without_the_descent_table() -> None:
+    """v10 adds the descent export; v9 is legacy: no drain table, honest absence.
+
+    The replay of a v9 file reports its basins as un-derivable-by-v10: the
+    adjacency was never recorded, and proximity -- what the old rule used -- is
+    exactly what v10 rejected. The loader must not invent it.
+    """
+    payload = _export(show_all_minimum_basins=True)
+    payload["schema_version"] = 9
+    for key in ("min_connections_list", "descent_connection_stats"):
+        payload["derived_metrics"].pop(key)
+
+    params = load_params_from_dict(payload)
+
+    assert params["show_all_minimum_basins"] is True
+    assert "min_connections_list" not in params["derived_metrics"]

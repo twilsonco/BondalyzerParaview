@@ -219,13 +219,23 @@ DEFAULT_UI_STATE: dict[str, Any] = {
 # All four are METRICS, not controls: absent sections in an older file mean the
 # feature did not exist, never a computed-empty. v8 is admitted as legacy for the
 # same reason v7 was: every snapshot on disk predates the export.
-PARAMS_SCHEMA_VERSION = 9
+#
+# Version 10 exports the descent connector: min_connections_list (the saddle->min
+# drain table -- the basin adjacency itself, arc geometry included) and its
+# summary descent_connection_stats. basin v10 bounds a minimum's basin by the
+# ascent arcs at the saddles that DRAIN into it, so a saved observation is not
+# verifiable without the drainage: v9 recorded the arcs and rebuilt the ring from
+# spatial proximity (the k=3 nearest saddles), which saturated on few-saddle
+# systems and could not be diagnosed from the file. v9 is admitted as legacy: it
+# has no descent table, so the loader's replay reports its basins as
+# un-derivable-by-v10 rather than reconstructing them from the rule v10 rejected.
+PARAMS_SCHEMA_VERSION = 10
 
 # Older schema versions that still load, with absent controls defaulted. A
 # snapshot is a record of what was ON SCREEN, so refusing to read a file written
 # before a control was invented destroys the evidence. The current version stays
 # strict: a truncated CURRENT file is a bug to surface, not a gap to paper over.
-PARAM_LEGACY_SCHEMA_VERSIONS: frozenset[int] = frozenset({2, 3, 4, 5, 6, 7, 8})
+PARAM_LEGACY_SCHEMA_VERSIONS: frozenset[int] = frozenset({2, 3, 4, 5, 6, 7, 8, 9})
 
 # Every editable control, in DEFAULT_UI_STATE's canonical order.
 PARAM_CONTROL_KEYS: tuple[str, ...] = tuple(DEFAULT_UI_STATE)
@@ -285,6 +295,10 @@ PARAM_METRIC_KEYS: tuple[str, ...] = (
     # saddle_id -> outgoing arcs, and each minimum's boundary cycle.
     "connection_graph",
     "minimum_basins",
+    # basin v10: the descent drain table (the adjacency) and its summary.
+    # Absent in a v9-era file -- the feature did not exist, never computed-empty.
+    "min_connections_list",
+    "descent_connection_stats",
 )
 
 # The probe's summary, in the order ``make_ridge_probe_stats`` writes it. Exported so
