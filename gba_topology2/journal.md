@@ -4131,7 +4131,7 @@ MC20 is a 4-branch monkey saddle; only br0/br1 close the ring with MC15. The
 target-degree histogram over the same arcs is `{MC36: 2, MC40: 2, MC42: 1,
 MC34: 1}`, and v11 read that histogram as:
 
-```python
+```text
 if min_deg == 1:
     arcs_to_use = boundary_arcs   # "open boundary": keep all
 elif max_deg > 2:
