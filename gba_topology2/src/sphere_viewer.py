@@ -4391,6 +4391,10 @@ def run_sphere_viewer(
     def load_params_from_file(path: str) -> None:
         """Load a parameter snapshot from disk and restore the viewer.
 
+        Basin caches are cleared to force recomputation with the current
+        filtering logic, ensuring old params files benefit from any new
+        filtering rules (e.g., monkey saddle branch filtering).
+
         Args:
             path: Path of the JSON snapshot to read.
 
@@ -4411,6 +4415,14 @@ def run_sphere_viewer(
             source_path=os.path.abspath(path),
         )
         apply_restore_plan(plan)
+        # Clear basin caches to force recomputation with the current filtering
+        # logic. Old saved params may have basin data computed without the latest
+        # filtering rules (e.g., monkey saddle branch filtering).
+        global _minimum_basins_cache, _maximum_basins_cache
+        _minimum_basins_cache = None
+        _maximum_basins_cache = None
+        state.minimum_basins = None
+        state.maximum_basins = None
         state.params_last_loaded_path = os.path.abspath(path)
         print(f"[sphere_viewer] Parameters loaded from: {os.path.abspath(path)}")
 
