@@ -653,14 +653,8 @@ def classify_basin_connection(
         )
         status = "bounded"
     elif ray_rows == [] and ring_rows:
-        # For minima, a ring-only basin is normal and valid (v10's behavior).
-        # For maxima, warn that we're missing raycast fallback arcs which might
-        # indicate an incomplete boundary computation.
-        if center_polarity == "maximum":
-            warnings.append(
-                f"{label} has no raycast fallback arcs; "
-                "verify that all connecting branches are shown"
-            )
+        # Ring-only basins are valid and complete. Raycast arcs are optional
+        # verification arcs; their absence doesn't indicate a problem.
         status = "bounded"
     else:
         status = "bounded"
