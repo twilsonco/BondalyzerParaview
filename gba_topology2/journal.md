@@ -4299,3 +4299,42 @@ Not wired into the viewer on purpose: the trame overlay (`_build_basin_boundary_
 directly from state and draws them as segments, so it has no need of the loop
 order. `basin_loop` is the params-file / analysis path -- the same rule, for
 data that has already left the session.
+
+## 2026-11-14 — Both show-all switches show both families: pinned basin groups (basin v13)
+
+### Symptom
+
+Enabling "Show All Minimum Basin Boundaries" and "Show All Maximum Basin
+Boundaries" together rendered only the maximum rings — the maximum toggle
+appeared to supersede the minimum one.
+
+### Cause
+
+v11's occlusion pass (`basin_draw_order`, `src/sphere_viewer.py`) drops a
+polarity group whenever any ring of the opposite polarity occludes it, and
+`occludes("maximum", "minimum")` is unconditionally True (a hill's stable
+shell is the OUTER one). So one maximum ring on screen deleted the entire
+minimum group. For the selection-driven switches that rule is the feature:
+the pair orders so a visible shell hides the ring it screens. With BOTH
+show-all switches on it is a bug: the operator asked for the two families
+side by side, and the honest reading of "both on" is "draw both".
+
+### Fix
+
+`basin_draw_order` gained a keyword-only `pinned: Iterable[str] = ()`:
+a pinned group is exempt from the occlusion drop (not from the emptiness
+check — pinning invents no rings). `_apply_basin_groups` passes
+`pinned = {"minimum", "maximum"}` exactly when `show_all_minimum_basins`
+AND `show_all_maximum_basins` are both on; every other toggle combination
+is the v11 rule unchanged (empty pinned set). Z-order primacy keeps the
+maximum rings drawn on top of the minimum ones, and the stats/classifier
+now report both groups, since they read `visible[polarity]` — the same
+render truth.
+
+### Gate
+
+872 passed, 1 skipped (`tests/test_sphere_viewer_basin_groups.py` +6:
+pinned pair survives; pinning one side keeps the rule for the other;
+pinning does not invent a group; default pinned set == v11 rule; a source
+guard pins that `_apply_basin_groups` reads both show-all keys and passes
+`pinned=pinned`). `mypy` clean on the viewer, `ruff format`/`check` clean.

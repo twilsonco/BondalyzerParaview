@@ -536,7 +536,11 @@ def occludes(occluder: str, center: str) -> bool:
     return occluder in RAYCAST_OCCLUDERS
 
 
-def basin_draw_order(rings: Iterable[Mapping[str, Any]]) -> list[str]:
+def basin_draw_order(
+    rings: Iterable[Mapping[str, Any]],
+    *,
+    pinned: Iterable[str] = (),
+) -> list[str]:
     """Order the visible basin groups, deepest shell first.
 
     One event per occlusion: a group is dropped when any ring of the opposite
@@ -546,15 +550,23 @@ def basin_draw_order(rings: Iterable[Mapping[str, Any]]) -> list[str]:
     is empty is never visible and never occludes -- an open hill does not hide a
     valley.
 
+    A group named in ``pinned`` is never dropped by occlusion: the caller has
+    asked for BOTH sets on screen, so the mutual hiding is accepted, not an
+    artefact to resolve. Pinning does not create a group -- a pinned group with
+    no rings is still nothing to draw.
+
     Args:
         rings: Render rows, each with ``polarity`` (the centre it bounds) and
             ``kind`` (``"ring"`` or ``"ray"``).
+        pinned: Polarity group names that occlusion must not drop (empty by
+            default, which is the v11 rule unchanged).
 
     Returns:
         The polarity group names to draw, minimum basins first: the minimum
         side, which has been on screen since v10, keeps z-order primacy.
     """
     rows = list(rings)
+    keep = set(pinned)
     visible: list[str] = []
     for center in ("minimum", "maximum"):
         mine = [
@@ -562,11 +574,14 @@ def basin_draw_order(rings: Iterable[Mapping[str, Any]]) -> list[str]:
         ]
         if not mine:
             continue
-        others = [
-            r for r in rows if r.get("polarity") != center and r.get("kind") == "ring"
-        ]
-        if any(occludes(str(o.get("polarity", "")), center) for o in others):
-            continue
+        if center not in keep:
+            others = [
+                r
+                for r in rows
+                if r.get("polarity") != center and r.get("kind") == "ring"
+            ]
+            if any(occludes(str(o.get("polarity", "")), center) for o in others):
+                continue
         visible.append(center)
     return visible
 
@@ -4843,6 +4858,11 @@ def run_sphere_viewer(
         are visible is decided before anything is drawn, so a maximum ring hiding
         a minimum ring is one event with one message, not two interleaved
         drawing decisions.
+
+        Exception: with BOTH show-all switches on the operator has asked for the
+        two families side by side, so both groups are pinned and drawn -- the
+        mutual hiding is accepted (the maximum rings sit on top, per z-order
+        primacy) instead of silently superseding the minimum set.
         """
         rows: dict[str, list[dict[str, Any]]] = {
             "minimum": _state_list(state.min_basin_arcs, "min_basin_arcs"),
@@ -4859,8 +4879,14 @@ def run_sphere_viewer(
             or bool(state.show_all_maximum_basins),
         }
         visible: dict[str, list[dict[str, Any]]] = {"minimum": [], "maximum": []}
+        # Both show-all switches on => show both sets: pin the pair so the
+        # occlusion pass cannot drop the minimum group under a maximum ring.
+        # Every other toggle combination keeps the v11 rule (pinned = empty).
+        pinned: set[str] = set()
+        if bool(state.show_all_minimum_basins) and bool(state.show_all_maximum_basins):
+            pinned = {"minimum", "maximum"}
         ring_rows = [r for g in rows.values() for r in g]
-        for polarity in basin_draw_order(ring_rows):
+        for polarity in basin_draw_order(ring_rows, pinned=pinned):
             if show[polarity]:
                 visible[polarity] = rows[polarity]
         for polarity in ("minimum", "maximum"):

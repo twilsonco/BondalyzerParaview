@@ -165,6 +165,36 @@ class TestBasinDrawOrder:
         rows.append(_ring("maximum"))
         assert basin_draw_order(rows) == ["maximum"]
 
+    def test_a_pinned_group_survives_the_opposite_shell(self) -> None:
+        """Show-all + show-all: the operator asked for BOTH families on screen,
+        so the pair is pinned and the mutual hiding is accepted. The maximum
+        rings draw on top (z-order primacy), they do not supersede."""
+        rows = [_ring("minimum"), _ring("maximum")]
+        assert basin_draw_order(rows, pinned=("minimum", "maximum")) == [
+            "minimum",
+            "maximum",
+        ]
+
+    def test_pinning_one_side_uses_the_rule_for_the_other(self) -> None:
+        """Pinning is per-group, not a global off-switch for the rule."""
+        rows = [_ring("minimum"), _ring("maximum")]
+        # Only the minimum is pinned; the maximum is unpinned, and a minimum's
+        # inner shell does not occlude it, so both survive.
+        assert basin_draw_order(rows, pinned=("minimum",)) == ["minimum", "maximum"]
+        # Only the maximum is pinned; the unpinned minimum is dropped as before.
+        assert basin_draw_order(rows, pinned=("maximum",)) == ["maximum"]
+
+    def test_pinning_does_not_invent_a_group(self) -> None:
+        """A pinned group with no rings is still nothing to draw: pinning
+        bypasses the occlusion drop, not the emptiness check."""
+        assert basin_draw_order([_ring("maximum")], pinned=("minimum",)) == ["maximum"]
+
+    def test_the_default_pinned_set_is_the_v11_rule_unchanged(self) -> None:
+        rows = [_ring("minimum"), _ring("maximum")]
+        assert (
+            basin_draw_order(rows, pinned=()) == basin_draw_order(rows) == ["maximum"]
+        )
+
 
 # ---------------------------------------------------------------------------
 # C. The gates and colours, one per polarity
@@ -699,6 +729,18 @@ class TestViewerWiring:
         assert "visible[" in src
         assert "classify_basin_connection" in src
         assert "basin_draw_order" in src
+
+    def test_both_show_all_switches_pin_the_pair(self) -> None:
+        """The drawer half of "both show-all toggles show both sets": the group
+        pass reads the two show-all keys and passes the pinned pair to
+        :func:`basin_draw_order`, so the maximum rings no longer supersede the
+        minimum rings when both switches are on. Every other combination keeps
+        the v11 rule (an empty pinned set)."""
+        src = _body_src("_apply_basin_groups")
+        assert "show_all_minimum_basins" in src
+        assert "show_all_maximum_basins" in src
+        assert "pinned" in src
+        assert "basin_draw_order(ring_rows, pinned=pinned)" in src
 
     def test_active_ids_come_from_the_drawn_rows(self) -> None:
         src = _body_src("_apply_basin_groups")
