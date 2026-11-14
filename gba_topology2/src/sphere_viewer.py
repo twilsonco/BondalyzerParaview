@@ -653,7 +653,14 @@ def classify_basin_connection(
         )
         status = "bounded"
     elif ray_rows == [] and ring_rows:
-        warnings.append(f"{label} has no rays; its basin is unbounded")
+        # For minima, a ring-only basin is normal when the boundary is a closed
+        # cycle with verified connections. For maxima, warn about ring-only as it
+        # may indicate an incomplete boundary (missing raycast fallback arcs).
+        if center_polarity == "maximum":
+            warnings.append(
+                f"{label} is bounded by rings only (no raycast arcs); "
+                "verify that all connecting branches are shown"
+            )
         status = "bounded"
     else:
         status = "bounded"

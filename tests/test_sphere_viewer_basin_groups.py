@@ -336,13 +336,13 @@ class TestClassifyBasinConnection:
         assert out["n_rings"] == 0
 
     def test_a_rayless_ring_set_is_bounded_and_says_its_boundary_is_open(self) -> None:
-        """A ring with no rays closes the basin but reports that the separatrix
-        set is incomplete -- both facts at once, one status."""
+        """A minimum's ring-only basin is valid and bounded; no warning for absent rays."""
         out = classify_basin_connection(
             "minimum", [_ring("minimum")], MIN_BASIN_GATE_DEG
         )
         assert out["status"] == "bounded"
-        assert any("no rays" in w for w in out["warnings"])
+        # For minima, ray-only absence is not a problem; the boundary is closed by rings
+        assert not any("rays" in w.lower() for w in out["warnings"])
 
     def test_the_gate_ignores_rays(self) -> None:
         """The gate measures separation between RINGS; rays have no separation,

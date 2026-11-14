@@ -348,10 +348,15 @@ def find_minimum_basins(
         for saddle_id in sorted(adjacent):
             boundary_arcs.extend(graph.get(saddle_id, []))
 
+        # Don't filter: preserve all arcs. Filtering can be too aggressive and
+        # remove valid boundary arcs. The visualization will show the geometry as
+        # computed from the descent/ascent graph, which is the ground truth.
         if boundary_arcs:
+            arcs_to_use = boundary_arcs
+
             basins_dict[minimum.center_id] = MinimumBasin(
                 minimum_id=minimum.center_id,
-                boundary_arcs=boundary_arcs,
+                boundary_arcs=arcs_to_use,
             )
 
     return basins_dict
@@ -426,10 +431,15 @@ def find_maximum_basins(
         for saddle_id in sorted(adjacent):
             boundary_arcs.extend(graph.get(saddle_id, []))
 
+        # Don't filter: preserve all arcs. Filtering can be too aggressive and
+        # remove valid boundary arcs. The visualization will show the geometry as
+        # computed from the descent/ascent graph, which is the ground truth.
         if boundary_arcs:
+            arcs_to_use = boundary_arcs
+
             basins_dict[maximum.center_id] = MaximumBasin(
                 maximum_id=maximum.center_id,
-                boundary_arcs=boundary_arcs,
+                boundary_arcs=arcs_to_use,
             )
 
     return basins_dict
