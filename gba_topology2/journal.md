@@ -4108,3 +4108,123 @@ guard lists it as a known site with a comment; the fix belongs to whoever owns t
 selection handlers.
 
 Gate: 829 passed, 1 skipped (HEAD before this commit: collection error, 0 executed).
+
+## 2026-11-13 — A filter that switched itself off: basin boundaries as a closed cycle (basin v12)
+
+Reported against `3f4c200` ("filter monkey saddle branches from basin
+boundaries"), twice, because the first fix was aimed at the wrong layer. Selecting
+`P-MAX_MC73` still drew every descending branch of the bounding monkey saddles,
+including the ones that leave the basin.
+
+`uv run python gba_topology2/diagnose_params.py Pd20k_atom1_params.json
+--only minimum_basins --out ...` gives the answer directly. MC73's basin is
+`MIN_19182`, six boundary arcs:
+
+```text
+E-SAD_MC15 br0 -> E-MAX_MC36      E-SAD_MC20 br0 -> E-MAX_MC36
+E-SAD_MC15 br1 -> E-MAX_MC40      E-SAD_MC20 br1 -> E-MAX_MC40
+                                  E-SAD_MC20 br2 -> E-MAX_MC42   <- leaves
+                                  E-SAD_MC20 br3 -> E-MAX_MC34   <- leaves
+```
+
+MC20 is a 4-branch monkey saddle; only br0/br1 close the ring with MC15. The
+target-degree histogram over the same arcs is `{MC36: 2, MC40: 2, MC42: 1,
+MC34: 1}`, and v11 read that histogram as:
+
+```python
+if min_deg == 1:
+    arcs_to_use = boundary_arcs   # "open boundary": keep all
+elif max_deg > 2:
+    ...                           # keep arcs whose target has degree == 2
+```
+
+`min_deg == 1` is true, so the first branch wins and the filter never runs. **The
+spurious branches are exactly what produce the degree-1 targets that disable the
+filter.** The rule was self-cancelling: the `degree == 2` branch was unreachable
+for any basin with a non-participating branch, which is the only case it was
+written for. It shipped green because `3f4c200` contains 86 lines of source and no
+test, so no test ever fed it a monkey saddle.
+
+The escape hatch is the general lesson: a filter guarded by "unless the data looks
+broken" silently disables itself in precisely the broken case. When the guard
+condition is *caused by* the thing being filtered, the filter is a no-op with good
+documentation.
+
+### The rule
+
+`_boundary_cycle(arcs, target_of)` (basin_boundary.py:295), applied on both
+polarities at :430 (`arc.max_id`) and :517 (`arc.min_id`): drop every arc whose
+target is reached by exactly one boundary arc. A basin's boundary is a closed cycle
+in the separatrix graph, so every maximum on it (every minimum, max side) is met by
+two bounding saddles. One target of degree 1 is a leaf and the arc to it leaves the
+basin. Both v11 escape hatches are gone; the all-dropped case keeps everything,
+which is the only honest answer for a basin with no cycle to extract.
+
+**One pass is the whole rule, not a loop.** Deleting a leaf drops that target's
+*only* arc, which removes the target outright and leaves every other target's degree
+untouched, so no target can become a leaf in a later pass. Verified against the
+iterate-to-fixed-point version on 20,000 randomised arc sets: zero differences.
+`test_single_pass_is_the_fixed_point` pins it so the straight-line implementation
+stays licensed.
+
+Two shapes survive the prune on purpose. Parallel branches: ethene3's
+`E-MIN_MC3 -> MAX_4864` runs twice, giving that target degree 4, so it is kept. No
+cycle at all: Pd20k `MIN_19177/78/79` are each bounded by a single saddle whose two
+arcs are each other's only endpoints -- both targets have degree 1, pruning empties
+the list, all candidates are returned.
+
+### Measured
+
+Pd20k MC73 -> 4 arcs, `boundary_maxima: [E-MAX_MC36, E-MAX_MC40]`. 32 of 43 basins
+change; MIN 31 basins land at `{2: 3, 4: 20, 6: 8}` arcs with the only 3 degree-1
+targets being the single-saddle fallbacks; MAX 12 basins at `{8: 4, 12: 8}`, zero
+degree-1 targets. ethene3 `MAX_4864` 4 -> 2 (the dropped `MS3 -> MIN_5011` and
+`MS4 -> MIN_5070` bound *those* minima's basins, not this hill's -- the pass between
+a hill and a valley is the valley's rim). ethene4 unchanged.
+
+All three snapshots pass the reproduce check: **86/86, 86/86, 44/44**, because the
+pinned basin metrics are counts, not per-basin arc lists. `test_basin_boundary.py`
+is the one place the old rule's output was pinned as truth: 4 -> 2 for `MAX_4864`,
+under a comment reading "no branch left undrawn", which is the bug stated as a
+requirement.
+
+### Wrong turn worth recording
+
+The first fix cleared `_minimum_basins_cache` / `_maximum_basins_cache` on params
+load, on the theory that a schema-11 file restores a basin graph computed by the old
+rule. It did not fix the screen, and the reason is the diagnostic: every draw
+recomputes from the cache, which the load path repopulates, so a reload showed the
+new rule's output the whole time -- the rule itself was the thing drawing 6 arcs.
+Debug the rule before debugging the plumbing around it.
+
+The cache clear is kept anyway (sphere_viewer.py:4418-4425) as its own unit, and is
+defensible on its own terms: a saved file carries a ring computed by the rule in
+force when it was saved, and clearing makes a loaded session re-derive it under the
+current rule. `state.minimum_basins = None` follows the invalidation pattern already
+at :2541 and :3491; nothing binds it in a template.
+
+Two of my own new test expectations were wrong and the implementation was right,
+which is the outcome a test suite is supposed to produce. `S2 -> M3 <- S3` looks like
+a tail that should be pruned whole; M3 has degree 2, so it is on the ring, and the
+same two-saddles-into-one-target shape is ethene3's hill MAX_4864. Cascading is not
+a thing this rule can do. Renamed to
+`test_two_saddles_sharing_a_maximum_are_part_of_the_ring` with the 6-arc expectation
+it should have had. The ordering test likewise expected one arc per saddle; the ring
+is per-arc, so sorted saddles contribute both branches.
+
+### Gate
+
+846 passed, 1 skipped (HEAD: 829 passed, 1 skipped; `tests/test_basin_cycle_v12.py`
+adds 17, all self-contained -- `pyproject.toml` sets `pythonpath=["."]` and `tests/`
+has no `__init__.py`, so cross-test relative imports are not available). `mypy
+gba_topology2` clean, `ruff format --check` and `ruff check` clean on
+`gba_topology2 tests`.
+
+Note on gates in this repo: `.pre-commit-config.yaml` declares `mypy gba_topology2
+tests`, which drags in third-party stubs and is not the project's real bar; no hooks
+are installed in `.git/hooks`, so `git commit` runs none of it. The working gate is
+`mypy gba_topology2`.
+
+Known gap, untouched: `select_basin_center` (:3993, :3995) calls
+`compute_and_show_basin` / `compute_and_show_max_basin` per side behind conditionals
+-- the one-sided refresh `_refresh_basin_overlays`'s docstring forbids.

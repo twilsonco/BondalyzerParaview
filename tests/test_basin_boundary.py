@@ -1379,10 +1379,15 @@ class TestEthene3MaximumBasin:
     """The real data: the hill MAX_4864, ringed by the two saddles that climb it.
 
     Fixture: the ethene3 rows above. Both saddles ascend into MAX_4864 (2
-    branches each) and drain into the minima of the valley, so the maximum's
-    boundary is the SAME four arcs that ring E-MIN_MC3 -- the pass between the
-    hill and the valley is the valley's own rim. This is the v11 rule on the
-    user's screen: descent arcs, drawn for the first time.
+    branches each) and drain into the minima of the valley, so the hill's ring
+    is the pair of arcs that close on E-MIN_MC3 -- the pass between the hill
+    and the valley is the valley's own rim. This is the v11 rule on the user's
+    screen: descent arcs, drawn for the first time.
+
+    MS3's second branch drains to MIN_5011 and MS4's to MIN_5070. Neither of
+    those minima touches the hill on the far side -- a single arc reaching them
+    is a leaf, so they bound the basins of MIN_5011 and MIN_5070, not this
+    hill's. They were pinned here until the closed-cycle rule dropped them.
     """
 
     def test_max_4864_basin(self) -> None:
@@ -1412,14 +1417,12 @@ class TestEthene3MaximumBasin:
         ring = basins["MAX_4864"].boundary_arcs
         assert [(a.saddle_id, a.branch_index, a.min_id) for a in ring] == [
             ("E-SAD_MS3", 0, "E-MIN_MC3"),
-            ("E-SAD_MS3", 1, "MIN_5011"),
             ("E-SAD_MS4", 0, "E-MIN_MC3"),
-            ("E-SAD_MS4", 1, "MIN_5070"),
         ]
-        # The ring covers every descent branch of every saddle that climbs the
-        # hill: 2 saddles x 2 branches each, no branch left undrawn.
+        # The ring is closed: both bounding saddles, and the one minimum they
+        # share, with the two dangling descents pruned off.
         minima = serialize_maximum_basins(basins)["MAX_4864"]["boundary_minima"]
-        assert minima == ["E-MIN_MC3", "MIN_5011", "MIN_5070"]
+        assert minima == ["E-MIN_MC3"]
         # E-SAD_MS3 bounds BOTH ends of the pass: it is in this hill's ring and
         # in the basin of each minimum it drains into.
         min_basins = find_minimum_basins(conn_objs, basin_centers, descents)
