@@ -315,6 +315,13 @@ def find_minimum_basins(
         Dict[minimum_id, MinimumBasin] keyed by minimum CP ID. A minimum with
         no draining saddle is absent.
 
+    Notes:
+        When a boundary saddle is a monkey saddle (χ < -1), it may have more
+        than 2 ascending connections. This function filters the collected arcs
+        to retain only those forming the closed boundary cycle: arcs whose
+        target maxima have degree exactly 2 (appear in arcs from 2 bounding
+        saddles). Non-participating branches are excluded.
+
     Raises:
         ValueError: If topology is malformed.
     """
@@ -349,9 +356,44 @@ def find_minimum_basins(
             boundary_arcs.extend(graph.get(saddle_id, []))
 
         if boundary_arcs:
+            # Filter to preserve only the closed boundary cycle: keep only arcs
+            # targeting maxima with degree exactly 2 (connected to 2 boundary
+            # saddles). This removes extraneous branches from monkey saddles.
+            max_degree: dict[str, int] = {}
+            for arc in boundary_arcs:
+                if arc.max_id is not None:
+                    max_degree[arc.max_id] = max_degree.get(arc.max_id, 0) + 1
+
+            # Decide filtering strategy based on degree distribution:
+            # - Open boundaries have degree-1 endpoints -> keep all (no filter)
+            # - Closed loops with monkey saddle (degree>2) -> filter to degree==2
+            # - Pure closed loops (all degree==2) -> keep all (no filter)
+            if max_degree:
+                min_deg = min(max_degree.values())
+                max_deg = max(max_degree.values())
+
+                if min_deg == 1:
+                    # Open boundary with degree-1 endpoints: keep all arcs
+                    arcs_to_use = boundary_arcs
+                elif max_deg > 2:
+                    # Closed loop with monkey saddle (degree>2): filter to degree==2
+                    # to remove non-participating branches
+                    filtered_arcs = [
+                        arc
+                        for arc in boundary_arcs
+                        if arc.max_id is not None and max_degree[arc.max_id] == 2
+                    ]
+                    # Use filtered if non-empty; else keep all (safety fallback)
+                    arcs_to_use = filtered_arcs if filtered_arcs else boundary_arcs
+                else:
+                    # Pure closed loop (all degree==2): keep all as-is
+                    arcs_to_use = boundary_arcs
+            else:
+                arcs_to_use = boundary_arcs
+
             basins_dict[minimum.center_id] = MinimumBasin(
                 minimum_id=minimum.center_id,
-                boundary_arcs=boundary_arcs,
+                boundary_arcs=arcs_to_use,
             )
 
     return basins_dict
@@ -393,6 +435,13 @@ def find_maximum_basins(
         no climbing saddle, or whose saddles have no descent records, is absent
         -- an open boundary is not a basin.
 
+    Notes:
+        When a boundary saddle is a monkey saddle (χ < -1), it may have more
+        than 2 descending connections. This function filters the collected arcs
+        to retain only those forming the closed boundary cycle: arcs whose
+        target minima have degree exactly 2 (appear in arcs from 2 bounding
+        saddles). Non-participating branches are excluded.
+
     Raises:
         ValueError: If topology is malformed.
     """
@@ -427,9 +476,44 @@ def find_maximum_basins(
             boundary_arcs.extend(graph.get(saddle_id, []))
 
         if boundary_arcs:
+            # Filter to preserve only the closed boundary cycle: keep only arcs
+            # targeting minima with degree exactly 2 (connected to 2 boundary
+            # saddles). This removes extraneous branches from monkey saddles.
+            min_degree: dict[str, int] = {}
+            for arc in boundary_arcs:
+                if arc.min_id is not None:
+                    min_degree[arc.min_id] = min_degree.get(arc.min_id, 0) + 1
+
+            # Decide filtering strategy based on degree distribution:
+            # - Open boundaries have degree-1 endpoints -> keep all (no filter)
+            # - Closed loops with monkey saddle (degree>2) -> filter to degree==2
+            # - Pure closed loops (all degree==2) -> keep all (no filter)
+            if min_degree:
+                min_deg = min(min_degree.values())
+                max_deg = max(min_degree.values())
+
+                if min_deg == 1:
+                    # Open boundary with degree-1 endpoints: keep all arcs
+                    arcs_to_use = boundary_arcs
+                elif max_deg > 2:
+                    # Closed loop with monkey saddle (degree>2): filter to degree==2
+                    # to remove non-participating branches
+                    filtered_arcs = [
+                        arc
+                        for arc in boundary_arcs
+                        if arc.min_id is not None and min_degree[arc.min_id] == 2
+                    ]
+                    # Use filtered if non-empty; else keep all (safety fallback)
+                    arcs_to_use = filtered_arcs if filtered_arcs else boundary_arcs
+                else:
+                    # Pure closed loop (all degree==2): keep all as-is
+                    arcs_to_use = boundary_arcs
+            else:
+                arcs_to_use = boundary_arcs
+
             basins_dict[maximum.center_id] = MaximumBasin(
                 maximum_id=maximum.center_id,
-                boundary_arcs=boundary_arcs,
+                boundary_arcs=arcs_to_use,
             )
 
     return basins_dict
