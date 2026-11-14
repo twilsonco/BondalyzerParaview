@@ -4228,3 +4228,74 @@ are installed in `.git/hooks`, so `git commit` runs none of it. The working gate
 Known gap, untouched: `select_basin_center` (:3993, :3995) calls
 `compute_and_show_basin` / `compute_and_show_max_basin` per side behind conditionals
 -- the one-sided refresh `_refresh_basin_overlays`'s docstring forbids.
+
+## 2026-11-14 — Walking the basin boundary: from arc keys to an ordered loop
+
+Question from a saved snapshot (`Pd20k_atom1_params.json`, "Show All Maximum
+Basin Boundaries" on): the `maximum_basins` dict gives, per maximum, a list of
+`{saddle_id, branch_index, min_id}`. How do you get the xyz of the boundary, in
+order, as a loop?
+
+### The join (the easy half)
+
+`boundary_arcs` stores NO geometry -- `serialize_maximum_basins` (:618) emits
+only the three keys. `arc_points` is on the DESCENT row, found by
+`(saddle_id, branch_index)`:
+
+    by_key = {(r["saddle_id"], r["branch_index"]): r["arc_points"]
+              for r in derived_metrics["min_connections_list"]}
+
+The polarity duality is easy to get backwards (basin v11): a MAXIMUM's basin is
+made of saddle->MINIMUM arcs, so it reads `min_id` out of
+`min_connections_list`; a MINIMUM's basin reads `max_id` out of
+`max_connections_list`. Verified against the file: every `min_id` equals its
+row's `min_id`, and the table has a row for every (saddle, branch) the basins
+name.
+
+### The order (the actual work)
+
+Concatenating `boundary_arcs` is WRONG. The list is grouped by BOUNDARY SADDLE
+(`find_maximum_basins` sorts the saddles and appends each one's arcs), so
+E-MAX_MC31 reads MC1[0],MC1[1],MC2[0],MC2[1],MC9[...],MC7[...] -- eight spurs
+out of four saddles, not a ring.
+
+The ring is a bipartite graph, nodes = boundary saddles and boundary minima,
+every arc saddle->min, and the v12 cycle rule makes every node even-degree.
+Walk it: at the node you are standing on, take any unused incident arc. `arc_points`
+is stored SADDLE-FIRST, so a step that leaves a MINIMUM walks the next arc
+BACKWARDS -- reverse its polyline -- which is what keeps the curve continuous.
+E-MAX_MC31 comes out MC1->MIN_2->MC7->MC7->MC9->MIN_6->MC2->MC1, and joining
+`arc_points` with the reversals closes exactly: first point == last point,
+closure gap 0.00e+00, max step 0.0282 vs mesh pitch 0.0291.
+
+Degenerate shape found while checking every snapshot: ethene3's E-MIN_MC3 has
+two saddles, two branches each, ALL FOUR into the same maximum MAX_4864 (the
+hill that forced the v12 filter). The walk closes after two arcs -- a LENS (one
+saddle's two parallel branches, out and back) -- and the other two arcs form
+the second lens. So the return is a list of loops, not one loop, and the lens
+pairing at a degree-4 node is "lowest arc index first", which pairs a saddle's
+own two branches. All 29 basins / 208 arcs in Pd20k are single closed loops;
+ethene3 has 3 basins that split into 2 loops each; 0 unclosed.
+
+### Shipped
+
+`src/basin_loop.py`: `chain_boundary_arcs` (arcs -> walks), `walk_to_points`
+(walk + table -> xyz, reverses backward arcs, merges joints within
+`POINT_TOL = 1e-4`), `basin_boundary_loops` (one call from a params document),
+`endpoint_key_for` / `table_key_for` (the duality). A missing arc row RAISES --
+the basin records topology, the table owns geometry, and a silent skip draws a
+boundary with a hole in it. An arc with no endpoint (the `_boundary_cycle`
+no-cycle fallback) comes back as its own open walk at the end, never dropped.
+`gba_topology2/inspect_basin_loops.py` is the CLI (`--list`, `--basin`, `--dump`).
+
+### Gate
+
+867 passed, 1 skipped (HEAD: 846 passed, 1 skipped; `tests/test_basin_loop.py`
+adds 21). `mypy gba_topology2` clean, `ruff format --check` and `ruff check`
+clean on `gba_topology2 tests`.
+
+Not wired into the viewer on purpose: the trame overlay (`_build_basin_boundary_actor`
+-> `basin_boundary_arcs` -> `make_basin_line_source`) already walks the arcs
+directly from state and draws them as segments, so it has no need of the loop
+order. `basin_loop` is the params-file / analysis path -- the same rule, for
+data that has already left the session.
